@@ -207,10 +207,10 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         try engine.start()
 
         try await stream.startCapture()
-        lock.lock()
-        self.stream = stream
-        let stoppedDuringStart = stopped
-        lock.unlock()
+        let stoppedDuringStart = lock.withLock {
+            self.stream = stream
+            return stopped
+        }
         if stoppedDuringStart {
             // 起動中に Ctrl-C された場合。shutdown 側は stream を知らないのでここで止める
             try? await stream.stopCapture()
