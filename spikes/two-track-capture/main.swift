@@ -61,11 +61,13 @@ struct CaptureError: Error, CustomStringConvertible {
 // MARK: - 1トラック分の書き出し
 
 /// 最初のバッファの形式で WAV（16bit PCM）を開き、以降のバッファを書き足す。
+/// 2トラックの長さを揃えるため、arm() されるまでのバッファは捨てる。
 final class TrackWriter: @unchecked Sendable {
     let name: String
     let url: URL
     private let queue: DispatchQueue
     private var file: AVAudioFile?
+    private var armed = false
     private var closed = false
     private var sampleRate: Double = 0
     private var framesWritten: AVAudioFramePosition = 0
@@ -80,7 +82,7 @@ final class TrackWriter: @unchecked Sendable {
     /// 呼び出し元がバッファを使い回す可能性があるので同期で書く。
     func write(_ buffer: AVAudioPCMBuffer) {
         queue.sync {
-            guard !closed, buffer.frameLength > 0 else { return }
+            guard armed, !closed, buffer.frameLength > 0 else { return }
             do {
                 if file == nil {
                     let format = buffer.format
@@ -109,6 +111,16 @@ final class TrackWriter: @unchecked Sendable {
                 fputs("[\(name)] 書き込み失敗: \(error)\n", stderr)
             }
         }
+    }
+
+    /// 以降のバッファを書き込む。
+    func arm() {
+        queue.sync { armed = true }
+    }
+
+    /// 以降のバッファを捨てる。ファイルは close() まで開いたまま。
+    func disarm() {
+        queue.sync { closed = true }
     }
 
     /// ファイルを閉じて概要を返す。
@@ -214,7 +226,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         if stoppedDuringStart {
             // 起動中に Ctrl-C された場合。shutdown 側は stream を知らないのでここで止める
             try? await stream.stopCapture()
+            return
         }
+        // 両方が動き出してから書き始める。起動にかかる時間の分だけ片方が長くなるのを防ぐ
+        appWriter.arm()
+        micWriter.arm()
     }
 
     /// 止めてファイルを閉じてから終了する。2回目以降の呼び出しは無視する。
@@ -226,6 +242,9 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         lock.unlock()
         if already { return }
 
+        // 停止処理にかかる時間の分だけ片方が長くなるのを防ぐため、先に両方の書き込みを止める
+        appWriter.disarm()
+        micWriter.disarm()
         Task.detached { [self] in
             if let stream {
                 do { try await stream.stopCapture() } catch { fputs("stopCapture 失敗: \(error)\n", stderr) }

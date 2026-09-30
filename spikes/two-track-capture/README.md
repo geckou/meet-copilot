@@ -30,3 +30,8 @@ swiftc -O main.swift -o two-track-capture
 2. app 側に Chrome の音（Meet の相手、または YouTube など）だけが入っている
 3. mic 側に自分の声だけが入っている。スピーカーだと相手の声がマイクに回り込むので、ヘッドホンで確認する
 4. app 側が無音（ピークが -inf）なら、Chrome の音声がヘルパープロセスから出ていて前方一致で拾えていない可能性がある。起動時に表示される「対象アプリ」を確認し、`--app ""` で全アプリにして音が入るか比べる
+
+## 検証で分かったこと（2026-09-30, macOS 27.0 / Chrome 153）
+
+- 既定の `--app com.google.Chrome` で Chrome の音が取れる（ピーク -6.8 dBFS）。Chrome の音声はヘルパープロセス（`audio.mojom.AudioService`）から出ているが、含めるアプリに Chrome 本体を指定すれば拾える
+- 起動・停止にかかる時間はマイクと ScreenCaptureKit で違う。全アプリを対象にすると startCapture が遅く、マイク側が約 1.9 秒長くなった。そのため両方が動き出してから書き始め、停止処理の前に書き込みを止めている。修正後の差は 0.02 秒
