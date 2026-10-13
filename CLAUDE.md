@@ -20,7 +20,14 @@ Google Meet の会議中に、相手からの質問を拾ってローカルの�
 
 ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27.0）。`spikes/two-track-capture/` の実行ファイル1本で、Chrome の音声とマイクを別ファイルに書き出し、秒数が揃うこと、各トラックに入る音が分かれていることを実機で確認した。経緯と分かったことは同ディレクトリの README.md を参照。
 
-次は Xcode プロジェクトを作るかどうかの判断。
+次は本体を Swift Package（`Package.swift` + 実行ターゲット）で作る。`spikes/` は残す。
+
+## ビルド構成
+
+- Xcode プロジェクトは作らない。SwiftPM で組み、編集は Xcode で `Package.swift` を開けば足りる
+- 当面はターミナルから `swift run` で起動する。マイク・画面収録の権限はターミナル側に付く
+- .app として単体起動したくなったら、Info.plist（`NSMicrophoneUsageDescription`・bundle id）・.app へのまとめ・アドホック署名（`codesign -s -`）をスクリプトで足す。署名しないとビルドのたびに権限が外れうる
+- Xcode プロジェクトが要るのは entitlements の管理・公証・アセットカタログが必要になったとき。いずれも現状は対象外
 
 未検証のまま残っている点：
 - ヘッドホンなしで Meet に出たときの回り込み。相手の声がマイクに入る。対策候補は AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）
