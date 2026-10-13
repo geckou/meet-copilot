@@ -18,4 +18,9 @@ Google Meet の会議中に、相手からの質問を拾ってローカルの�
 
 ## 現在地
 
-最初のタスクは ScreenCaptureKit の2トラック取得の検証で、Swift の実行ファイル1本でアプリ音声とマイクを別ファイルに書き出すところまで。検証コードは `spikes/two-track-capture/` にあるが、実機での動作は未確認。Xcode プロジェクトの作成はその後で判断する。
+ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27.0）。`spikes/two-track-capture/` の実行ファイル1本で、Chrome の音声とマイクを別ファイルに書き出し、秒数が揃うこと、各トラックに入る音が分かれていることを実機で確認した。経緯と分かったことは同ディレクトリの README.md を参照。
+
+次は Xcode プロジェクトを作るかどうかの判断。
+
+未検証のまま残っている点：
+- ヘッドホンなしで Meet に出たときの回り込み。相手の声がマイクに入る。対策候補は AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）
