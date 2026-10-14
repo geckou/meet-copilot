@@ -110,7 +110,9 @@ final class TrackWriter: @unchecked Sendable {
                 framesWritten += AVAudioFramePosition(buffer.frameLength)
                 peak = max(peak, Self.peak(of: buffer))
             } catch {
-                fputs("[\(name)] 書き込み失敗: \(error)\n", stderr)
+                // ディスク不足などは続けても失敗し続けるので、最初の1回だけ報告して以降は捨てる
+                fputs("[\(name)] 書き込み失敗。以降のバッファは捨てる: \(error)\n", stderr)
+                closed = true
             }
         }
     }
