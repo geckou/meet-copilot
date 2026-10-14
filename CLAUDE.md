@@ -20,7 +20,7 @@ Google Meet の会議中に、相手からの質問を拾ってローカルの�
 
 ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27.0）。`spikes/two-track-capture/` の実行ファイル1本で、Chrome の音声とマイクを別ファイルに書き出し、秒数が揃うこと、各トラックに入る音が分かれていることを実機で確認した。経緯と分かったことは同ディレクトリの README.md を参照。
 
-本体の Swift Package を作成済み（2026-10-14）。spike の録音処理を `Capture` ターゲットへ移し、`swift run meet-copilot record` で同じ録音ができる形にした。`spikes/` は残す。
+本体の Swift Package を作成済み（2026-10-14）。spike の録音処理を `Capture` ターゲットへ移し、`swift run meet-copilot record` で同じ録音ができる形にした。実機で Chrome の音（ピーク -2.0 dBFS）とマイクが別ファイルに入り、秒数が揃う（10.50 秒ずつ）ことを確認済み。`spikes/` は残す。
 
 - `Sources/Capture/`：2トラック録音（`TwoTrackRecorder`）と WAV 書き出し（`TrackWriter`）
 - `Sources/meet-copilot/`：実行ターゲット。当面は CLI のサブコマンドのみ
