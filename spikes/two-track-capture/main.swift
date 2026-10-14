@@ -36,7 +36,9 @@ func parseOptions() -> Options {
             guard let v = args.next() else { fail("--out に値がない") }
             options.outputDir = URL(fileURLWithPath: v)
         case "--duration":
-            guard let v = args.next(), let d = Double(v), d > 0 else { fail("--duration は正の数") }
+            // ナノ秒の UInt64 に変換するので、inf や大きすぎる値はここで弾く
+            guard let v = args.next(), let d = Double(v), d > 0, d.isFinite,
+                  d * 1_000_000_000 < Double(UInt64.max) else { fail("--duration は正の数") }
             options.duration = d
         case "-h", "--help":
             print(usage)
@@ -163,6 +165,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     private let lock = NSLock()
     private var stream: SCStream?
     private var stopped = false
+    private var tapInstalled = false
 
     init(options: Options, appURL: URL, micURL: URL) {
         self.options = options
@@ -216,6 +219,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { [micWriter] buffer, _ in
             micWriter.write(buffer)
         }
+        lock.withLock { tapInstalled = true }
         try engine.start()
 
         try await stream.startCapture()
@@ -249,7 +253,10 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             if let stream {
                 do { try await stream.stopCapture() } catch { fputs("stopCapture 失敗: \(error)\n", stderr) }
             }
-            engine.inputNode.removeTap(onBus: 0)
+            // 起動途中のエラーで呼ばれた場合、タップが無いまま removeTap すると例外になる
+            if lock.withLock({ tapInstalled }) {
+                engine.inputNode.removeTap(onBus: 0)
+            }
             engine.stop()
             print("\n--- 結果 ---")
             print(appWriter.close())
