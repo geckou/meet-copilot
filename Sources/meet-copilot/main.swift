@@ -51,6 +51,36 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
     return options
 }
 
+/// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
+/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗や、WAV の書き込み失敗も反映する。
+final class Termination: @unchecked Sendable {
+    private let recorder: TwoTrackRecorder
+    private let lock = NSLock()
+    private var exitCode: Int32 = 0
+    private var finishing = false
+
+    init(recorder: TwoTrackRecorder) {
+        self.recorder = recorder
+    }
+
+    func finish(exitCode code: Int32) {
+        let first = lock.withLock {
+            exitCode = max(exitCode, code)
+            defer { finishing = true }
+            return !finishing
+        }
+        guard first else { return }
+        Task.detached { [self] in
+            let result = await recorder.stop()
+            print("\n--- 結果 ---")
+            print(result.app)
+            print(result.mic)
+            let writeFailed = result.app.writeError != nil || result.mic.writeError != nil
+            exit(lock.withLock { max(exitCode, writeFailed ? 1 : 0) })
+        }
+    }
+}
+
 func record(_ options: RecordOptions) -> Never {
     do {
         try FileManager.default.createDirectory(at: options.outputDir, withIntermediateDirectories: true)
@@ -67,14 +97,9 @@ func record(_ options: RecordOptions) -> Never {
         micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav")
     )
 
+    let termination = Termination(recorder: recorder)
     @Sendable func finish(exitCode: Int32) {
-        Task.detached {
-            let result = await recorder.stop()
-            print("\n--- 結果 ---")
-            print(result.app)
-            print(result.mic)
-            exit(exitCode)
-        }
+        termination.finish(exitCode: exitCode)
     }
 
     recorder.onUnexpectedStop = { error in
