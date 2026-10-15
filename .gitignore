@@ -1,3 +1,7 @@
 .build/
 .swiftpm/
 *.wav
+*.jsonl
+models/
+recordings/
+__pycache__/

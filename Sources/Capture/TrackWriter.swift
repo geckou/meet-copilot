@@ -41,6 +41,9 @@ final class TrackWriter: @unchecked Sendable {
     private var framesWritten: AVAudioFramePosition = 0
     private var peak: Float = 0
     private var writeError: Error?
+    /// 書き込み対象になったバッファ（arm 〜 disarm の間）を受け取る。書き込みより先に同期で呼ぶ。
+    /// バッファは呼び出し後に使い回されうるので、保持せずにその場で使う
+    var onAccepted: ((AVAudioPCMBuffer) -> Void)?
 
     init(name: String, url: URL) {
         self.name = name
@@ -52,6 +55,7 @@ final class TrackWriter: @unchecked Sendable {
     func write(_ buffer: AVAudioPCMBuffer) {
         queue.sync {
             guard armed, !closed, buffer.frameLength > 0 else { return }
+            onAccepted?(buffer)
             do {
                 if file == nil {
                     let format = buffer.format

@@ -17,6 +17,12 @@ public struct RecordingResult: Sendable {
     public let startError: String?
 }
 
+/// 録音するトラック。app はアプリ音声（相手）、mic はマイク（自分）。
+public enum Track: String, Sendable {
+    case app
+    case mic
+}
+
 /// 音声を取る対象として選ばれたアプリ。
 public struct CapturedApp: Sendable {
     public let bundleIdentifier: String
@@ -33,6 +39,11 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     /// 録音中にストリームが外部要因で止まったときに呼ばれる。start() の前に設定する。
     /// ここから stop() を呼んでファイルを閉じる。
     public var onUnexpectedStop: (@Sendable (Error) -> Void)?
+
+    /// ファイルに書き込むのと同じバッファを受け取る。2トラックとも同じ時点から届くので、
+    /// 届いたフレーム数から録音開始からの時刻が揃って出せる。start() の前に設定する。
+    /// 音声スレッドから同期で呼ばれる。バッファは呼び出し後に使い回されうるので、保持せずにその場で使う
+    public var onBuffer: (@Sendable (Track, AVAudioPCMBuffer) -> Void)?
 
     private let bundlePrefix: String
     private let appWriter: TrackWriter
@@ -82,6 +93,11 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     private func performStart() async throws -> [CapturedApp] {
         try await requestMicrophoneAccess()
         try requestScreenCaptureAccess()
+
+        if let onBuffer {
+            appWriter.onAccepted = { onBuffer(.app, $0) }
+            micWriter.onAccepted = { onBuffer(.mic, $0) }
+        }
 
         // --- アプリ音声（ScreenCaptureKit）---
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)

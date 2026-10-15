@@ -26,7 +26,11 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - `Sources/meet-copilot/`：実行ターゲット。当面は CLI のサブコマンドのみ
 - `Tests/CaptureTests/`：`TrackWriter` の単体テスト（`swift test`）
 
-次は文字起こしの外部プロセスへの受け渡し。
+文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。
+
+- `Sources/Transcription/`：外部プロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
+- `scripts/transcribe_whisper.py`：音量で発話を区切って whisper-server に送る。標準ライブラリのみ
+- モデルは `models/`（git 管理外）
 
 未検証のまま残っている点：
 - ヘッドホンなしで Meet に出たときの回り込み。相手の声がマイクに入る。対策候補は AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）
