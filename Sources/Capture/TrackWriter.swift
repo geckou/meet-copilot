@@ -14,6 +14,9 @@ public struct TrackSummary: Sendable, CustomStringConvertible {
 
     public var description: String {
         guard let inputFormat else {
+            if let writeError {
+                return "[\(name)] ファイルを作れなかった: \(url.path)\n  \(writeError)"
+            }
             return "[\(name)] 何も書き込まれていない（ファイル未作成）"
         }
         var line = String(format: "[%@] %.2f 秒, ピーク %.1f dBFS, %@", name, seconds, peakDBFS, url.path)

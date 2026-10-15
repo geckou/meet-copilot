@@ -9,6 +9,14 @@ public struct CaptureError: Error, CustomStringConvertible {
     public init(_ description: String) { self.description = description }
 }
 
+/// stop() の結果。
+public struct RecordingResult: Sendable {
+    public let app: TrackSummary
+    public let mic: TrackSummary
+    /// start() が失敗していればそのエラー。起動途中に stop() した場合も含めてここに残る
+    public let startError: String?
+}
+
 /// 音声を取る対象として選ばれたアプリ。
 public struct CapturedApp: Sendable {
     public let bundleIdentifier: String
@@ -35,7 +43,7 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     private var stream: SCStream?
     private var tapInstalled = false
     private var startTask: Task<[CapturedApp], Error>?
-    private var stopTask: Task<(app: TrackSummary, mic: TrackSummary), Never>?
+    private var stopTask: Task<RecordingResult, Never>?
 
     /// - Parameter bundlePrefix: 対象アプリの bundle id 前方一致。空文字で全アプリ
     public init(bundlePrefix: String, appURL: URL, micURL: URL) {
@@ -58,7 +66,7 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     /// 止めてファイルを閉じる。起動途中なら起動が終わるのを待ってから止める。
     /// 2回目以降の呼び出しは1回目と同じ結果を返す。
     @discardableResult
-    public func stop() async -> (app: TrackSummary, mic: TrackSummary) {
+    public func stop() async -> RecordingResult {
         let task = lock.withLock {
             if let stopTask { return stopTask }
             // 停止処理にかかる時間の分だけ片方が長くなるのを防ぐため、先に両方の書き込みを止める
@@ -129,9 +137,14 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
         }
     }
 
-    private func performStop() async -> (app: TrackSummary, mic: TrackSummary) {
+    private func performStop() async -> RecordingResult {
         // 起動途中で止めると後始末の対象が揃わないので、起動の成否が出るまで待つ
-        _ = try? await lock.withLock({ startTask })?.value
+        var startError: String?
+        do {
+            _ = try await lock.withLock({ startTask })?.value
+        } catch {
+            startError = "\(error)"
+        }
 
         let (stream, tapInstalled) = lock.withLock { (self.stream, self.tapInstalled) }
         if let stream {
@@ -142,7 +155,7 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
             engine.inputNode.removeTap(onBus: 0)
         }
         engine.stop()
-        return (appWriter.close(), micWriter.close())
+        return RecordingResult(app: appWriter.close(), mic: micWriter.close(), startError: startError)
     }
 
     // MARK: SCStreamOutput

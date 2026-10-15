@@ -49,4 +49,16 @@ final class TrackWriterTests: XCTestCase {
         XCTAssertNil(summary.inputFormat)
         XCTAssertFalse(FileManager.default.fileExists(atPath: summary.url.path))
     }
+
+    func testOpenFailureIsReported() {
+        let url = dir.appendingPathComponent("missing/t.wav")
+        let writer = TrackWriter(name: "t", url: url)
+        writer.arm()
+        writer.write(buffer(frames: 4800, amplitude: 0.5))
+        let summary = writer.close()
+
+        XCTAssertNotNil(summary.writeError)
+        XCTAssertTrue(summary.description.contains(url.path))
+        XCTAssertTrue(summary.description.contains(summary.writeError!))
+    }
 }

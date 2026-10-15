@@ -52,7 +52,7 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
 }
 
 /// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
-/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗や、WAV の書き込み失敗も反映する。
+/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗も反映する。
 final class Termination: @unchecked Sendable {
     private let recorder: TwoTrackRecorder
     private let lock = NSLock()
@@ -72,11 +72,15 @@ final class Termination: @unchecked Sendable {
         guard first else { return }
         Task.detached { [self] in
             let result = await recorder.stop()
+            // 起動の失敗は stop() の結果から出す。Ctrl-C で先に終了処理が始まっていても取りこぼさない
+            if let startError = result.startError {
+                fputs("error: \(startError)\n", stderr)
+            }
             print("\n--- 結果 ---")
             print(result.app)
             print(result.mic)
-            let writeFailed = result.app.writeError != nil || result.mic.writeError != nil
-            exit(lock.withLock { max(exitCode, writeFailed ? 1 : 0) })
+            let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
+            exit(lock.withLock { max(exitCode, failed ? 1 : 0) })
         }
     }
 }
@@ -122,7 +126,7 @@ func record(_ options: RecordOptions) -> Never {
                 print("  \(app.bundleIdentifier) (pid \(app.processID)) \(app.name)")
             }
         } catch {
-            fputs("error: \(error)\n", stderr)
+            // エラーの表示は終了処理で stop() の結果から出す
             finish(exitCode: 1)
             return
         }
