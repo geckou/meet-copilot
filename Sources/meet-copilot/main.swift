@@ -1,0 +1,154 @@
+// meet-copilot の本体。当面はターミナルから swift run で起動する。
+//
+// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
+
+import Capture
+import Foundation
+
+let usage = """
+usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
+
+record  アプリ音声（相手）とマイク（自分）を別々の WAV に書き出す
+  --app       対象アプリの bundle id 前方一致（既定: com.google.Chrome、空文字で全アプリ）
+  --out       出力ディレクトリ（既定: カレントディレクトリ）
+  --duration  録音秒数。省略時は Ctrl-C まで
+"""
+
+struct RecordOptions {
+    var bundlePrefix = "com.google.Chrome"
+    var outputDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    var duration: Double?
+}
+
+func fail(_ message: String) -> Never {
+    fputs("error: \(message)\n", stderr)
+    exit(1)
+}
+
+func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
+    var options = RecordOptions()
+    var args = arguments.makeIterator()
+    while let arg = args.next() {
+        switch arg {
+        case "--app":
+            guard let v = args.next() else { fail("--app に値がない") }
+            options.bundlePrefix = v
+        case "--out":
+            guard let v = args.next() else { fail("--out に値がない") }
+            options.outputDir = URL(fileURLWithPath: v)
+        case "--duration":
+            // ナノ秒の UInt64 に変換するので、inf や大きすぎる値はここで弾く
+            guard let v = args.next(), let d = Double(v), d > 0, d.isFinite,
+                  d * 1_000_000_000 < Double(UInt64.max) else { fail("--duration は正の数") }
+            options.duration = d
+        case "-h", "--help":
+            print(usage)
+            exit(0)
+        default:
+            fail("不明な引数: \(arg)\n\(usage)")
+        }
+    }
+    return options
+}
+
+/// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
+/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗も反映する。
+final class Termination: @unchecked Sendable {
+    private let recorder: TwoTrackRecorder
+    private let lock = NSLock()
+    private var exitCode: Int32 = 0
+    private var finishing = false
+
+    init(recorder: TwoTrackRecorder) {
+        self.recorder = recorder
+    }
+
+    func finish(exitCode code: Int32) {
+        let first = lock.withLock {
+            exitCode = max(exitCode, code)
+            defer { finishing = true }
+            return !finishing
+        }
+        guard first else { return }
+        Task.detached { [self] in
+            let result = await recorder.stop()
+            // 起動の失敗は stop() の結果から出す。Ctrl-C で先に終了処理が始まっていても取りこぼさない
+            if let startError = result.startError {
+                fputs("error: \(startError)\n", stderr)
+            }
+            print("\n--- 結果 ---")
+            print(result.app)
+            print(result.mic)
+            let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
+            exit(lock.withLock { max(exitCode, failed ? 1 : 0) })
+        }
+    }
+}
+
+func record(_ options: RecordOptions) -> Never {
+    do {
+        try FileManager.default.createDirectory(at: options.outputDir, withIntermediateDirectories: true)
+    } catch {
+        fail("出力ディレクトリを作れない: \(error)")
+    }
+
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd-HHmmss"
+    // AVAudioFile は既存ファイルを上書きするので、同じ秒に起動しても衝突しないよう短い乱数を足す
+    let suffix = UUID().uuidString.prefix(6).lowercased()
+    let stamp = "\(formatter.string(from: Date()))-\(suffix)"
+    let recorder = TwoTrackRecorder(
+        bundlePrefix: options.bundlePrefix,
+        appURL: options.outputDir.appendingPathComponent("app-\(stamp).wav"),
+        micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav")
+    )
+
+    let termination = Termination(recorder: recorder)
+    @Sendable func finish(exitCode: Int32) {
+        termination.finish(exitCode: exitCode)
+    }
+
+    recorder.onUnexpectedStop = { error in
+        fputs("ストリームが停止した: \(error)\n", stderr)
+        finish(exitCode: 1)
+    }
+
+    signal(SIGINT, SIG_IGN)
+    let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    sigint.setEventHandler { finish(exitCode: 0) }
+    sigint.resume()
+
+    Task.detached {
+        do {
+            let apps = try await recorder.start()
+            print("対象アプリ:")
+            for app in apps {
+                print("  \(app.bundleIdentifier) (pid \(app.processID)) \(app.name)")
+            }
+        } catch {
+            // エラーの表示は終了処理で stop() の結果から出す
+            finish(exitCode: 1)
+            return
+        }
+        if let duration = options.duration {
+            print("録音中... \(duration) 秒で止まる（Ctrl-C でも止まる）")
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            finish(exitCode: 0)
+        } else {
+            print("録音中... Ctrl-C で止める")
+        }
+    }
+
+    withExtendedLifetime(sigint) { dispatchMain() }
+}
+
+let arguments = CommandLine.arguments.dropFirst()
+switch arguments.first {
+case "record":
+    record(parseRecordOptions(arguments.dropFirst()))
+case "-h", "--help", nil:
+    print(usage)
+    exit(arguments.isEmpty ? 1 : 0)
+default:
+    fail("不明なサブコマンド: \(arguments.first!)\n\(usage)")
+}

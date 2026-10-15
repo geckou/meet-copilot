@@ -70,6 +70,18 @@ Swift で新規に書くのは音声の2トラック取得と画面まわりの�
 - 会話中の割り込み表示を入れるかどうか
 - 議事録生成を足すかどうか
 
+## 実行
+
+macOS 13 以降、Xcode が必要。
+
+```sh
+swift run meet-copilot record --duration 30 --out ./recordings
+```
+
+- オプションは `spikes/two-track-capture` と同じ（`--app` / `--out` / `--duration`）
+- 権限はターミナル側に付く。初回はマイクと画面収録の許可が要り、画面収録の許可後はターミナルの再起動が要る
+- テストは `swift test`
+
 ## 最初のタスク
 
 ScreenCaptureKit の2トラック取得の検証。Swift の実行ファイル1本で、アプリ音声とマイクを別ファイルに書き出すところまで。ここが通れば残りは繋ぎ込み。
