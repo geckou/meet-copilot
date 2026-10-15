@@ -113,7 +113,9 @@ def transcribe(url, pcm):
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
     with urllib.request.urlopen(request, timeout=120) as response:
-        return json.load(response).get("text", "").strip()
+        text = json.load(response).get("text", "")
+    # whisper の内部の区切りごとに改行が入るので、1件1行に収める
+    return " ".join(line.strip() for line in text.splitlines() if line.strip())
 
 
 # MARK: - 発話の区切り
