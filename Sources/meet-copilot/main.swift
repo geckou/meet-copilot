@@ -90,7 +90,9 @@ func record(_ options: RecordOptions) -> Never {
 
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyyMMdd-HHmmss"
-    let stamp = formatter.string(from: Date())
+    // AVAudioFile は既存ファイルを上書きするので、同じ秒に起動しても衝突しないよう短い乱数を足す
+    let suffix = UUID().uuidString.prefix(6).lowercased()
+    let stamp = "\(formatter.string(from: Date()))-\(suffix)"
     let recorder = TwoTrackRecorder(
         bundlePrefix: options.bundlePrefix,
         appURL: options.outputDir.appendingPathComponent("app-\(stamp).wav"),
