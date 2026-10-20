@@ -9,6 +9,7 @@ final class Transcript: @unchecked Sendable {
     private let queue = DispatchQueue(label: "transcript")
     private let handle: FileHandle
     private var count = 0
+    private var writeError: Error?
 
     init(url: URL) throws {
         self.url = url
@@ -43,16 +44,28 @@ final class Transcript: @unchecked Sendable {
                 try handle.write(contentsOf: line)
                 count += 1
             } catch {
+                // 端末には出ているので続けるが、ファイルが欠けたことは終了時に失敗として扱う
+                if writeError == nil { writeError = error }
                 fputs("文字起こしの書き込み失敗: \(error)\n", stderr)
             }
         }
     }
 
-    /// ファイルを閉じて概要を返す。
-    func close() -> String {
+    /// ファイルを閉じて概要を返す。書き込みに1回でも失敗していれば failed になる。
+    func close() -> (description: String, failed: Bool) {
         queue.sync {
-            try? handle.close()
-            return "[transcript] \(count) 件, \(url.path)"
+            var failed = writeError != nil
+            do {
+                try handle.close()
+            } catch {
+                if writeError == nil { writeError = error }
+                failed = true
+            }
+            var description = "[transcript] \(count) 件, \(url.path)"
+            if let writeError {
+                description += "\n  書き込み失敗で欠けている: \(writeError)"
+            }
+            return (description, failed)
         }
     }
 }

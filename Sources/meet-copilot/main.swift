@@ -24,7 +24,9 @@ let defaultTranscriber: String = {
     let repo = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let script = repo.appendingPathComponent("scripts/transcribe_whisper.py").path
-    return "exec python3 '\(script)'"
+    // シングルクォートで囲むので、パス中の ' は '\'' に置き換える
+    let quoted = script.replacingOccurrences(of: "'", with: "'\\''")
+    return "exec python3 '\(quoted)'"
 }()
 
 struct RecordOptions {
@@ -115,9 +117,14 @@ final class Termination: @unchecked Sendable {
             print("\n--- 結果 ---")
             print(result.app)
             print(result.mic)
-            if let transcript { print(transcript.close()) }
+            var transcriptFailed = false
+            if let transcript {
+                let summary = transcript.close()
+                print(summary.description)
+                transcriptFailed = summary.failed
+            }
             let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
-                || transcriberFailed
+                || transcriberFailed || transcriptFailed
             exit(lock.withLock { max(exitCode, failed ? 1 : 0) })
         }
     }

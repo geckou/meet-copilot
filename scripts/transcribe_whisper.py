@@ -146,11 +146,14 @@ def segment_stdin(args, segments):
     index = 0
 
     def flush():
-        nonlocal current, voiced, quiet
+        nonlocal current, recent, voiced, quiet
         # 末尾の静かな部分は送らない
         frames = current[: len(current) - quiet] if quiet < len(current) else current
         if voiced >= min_frames:
             segments.put((current_start * FRAME_SECONDS, b"".join(frames)))
+        # 送らなかった末尾の静かな部分は、すぐ次の発話が始まったときの pre-roll に回す
+        trailing = current[len(current) - quiet :] if quiet else []
+        recent = trailing[-pre_roll_frames:] if pre_roll_frames else []
         current, voiced, quiet = [], 0, 0
 
     stdin = sys.stdin.buffer
@@ -189,6 +192,7 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = parse_args()
     server, url = start_server(args)
+    failures = 0
     try:
         segments = queue.Queue()
         # 文字起こし中も標準入力を読み続けないと、パイプが詰まって録音側に溜まる
@@ -200,12 +204,17 @@ def main():
                 text = transcribe(url, pcm)
             except Exception as error:  # noqa: BLE001 1区切りの失敗で全体を止めない
                 log(f"{start:.1f}s 〜 {end:.1f}s の文字起こし失敗: {error}")
+                failures += 1
                 continue
             if text:
                 print(json.dumps({"start": round(start, 2), "end": round(end, 2), "text": text}, ensure_ascii=False), flush=True)
     finally:
         server.terminate()
         server.wait()
+    # 残りの区切りは処理し続けたうえで、取りこぼしがあったことを終了コードで録音側に伝える
+    if failures:
+        log(f"文字起こしに失敗した区切り: {failures} 件")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
