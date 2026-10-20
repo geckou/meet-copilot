@@ -100,6 +100,19 @@ swift run meet-copilot record --transcribe --out ./recordings
 - トラックごとに `scripts/transcribe_whisper.py` が1つずつ起動し、それぞれが whisper-server を空きポートで立てる。音量で発話を区切り、区切りごとに whisper に送るので、話し終わりから結果まで1秒前後遅れる
 - 文字起こしの仕組みは `--transcriber <command>` で差し替えられる。受け渡しの約束（標準入力に 16kHz・モノラル・16bit の生 PCM、標準出力に1行1件の JSON）は `Sources/Transcription/TranscriberProcess.swift` の冒頭を参照
 
+### 候補の抽出（claude -p）
+
+```sh
+swift run meet-copilot record --transcribe --candidates --out ./recordings
+```
+
+- 相手の発言が来て 2 秒新しい発言がなければ、直近 3 分のやり取りを `claude -p`（ツールなし）に渡し、相手が答えを求めている箇所を抜き出す
+- 候補は `[候補 01:23] 問い` と根拠の発言の形で端末に流れ、`candidates-<日時>.jsonl` に書き足される
+- 抽出は1回ずつ順に行い、実行中に来た発言は次の回にまとめる。既に出した候補は渡して重複を避ける
+- Claude Code にログイン済みであることが前提。利用枠は Claude Code のものを使う
+- スクリプト単体の確認：`python3 scripts/extract_candidates.py < scripts/testdata/conversation.jsonl`
+- 抽出の仕組みは `--extractor <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateExtractor.swift` の冒頭を参照
+
 ## 最初のタスク
 
 ScreenCaptureKit の2トラック取得の検証。Swift の実行ファイル1本で、アプリ音声とマイクを別ファイルに書き出すところまで。ここが通れば残りは繋ぎ込み。
