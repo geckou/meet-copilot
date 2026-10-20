@@ -1,23 +1,39 @@
 // meet-copilot の本体。当面はターミナルから swift run で起動する。
 //
-// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
+// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe]
 
 import Capture
 import Foundation
+import Transcription
 
 let usage = """
 usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
+                           [--transcribe | --transcriber <command>]
 
 record  アプリ音声（相手）とマイク（自分）を別々の WAV に書き出す
-  --app       対象アプリの bundle id 前方一致（既定: com.google.Chrome、空文字で全アプリ）
-  --out       出力ディレクトリ（既定: カレントディレクトリ）
-  --duration  録音秒数。省略時は Ctrl-C まで
+  --app          対象アプリの bundle id 前方一致（既定: com.google.Chrome、空文字で全アプリ）
+  --out          出力ディレクトリ（既定: カレントディレクトリ）
+  --duration     録音秒数。省略時は Ctrl-C まで
+  --transcribe   whisper.cpp（scripts/transcribe_whisper.py）で文字起こしし、transcript-<日時>.jsonl に書く
+  --transcriber  文字起こしに使うコマンド（/bin/sh -c で実行）。トラックごとに1つ起動し、
+                 環境変数 MEET_COPILOT_TRACK に app / mic を渡す
 """
+
+/// --transcribe で使うコマンド。swift run で動かす前提なので、ソースの場所からリポジトリを辿る
+let defaultTranscriber: String = {
+    let repo = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let script = repo.appendingPathComponent("scripts/transcribe_whisper.py").path
+    // シングルクォートで囲むので、パス中の ' は '\'' に置き換える
+    let quoted = script.replacingOccurrences(of: "'", with: "'\\''")
+    return "exec python3 '\(quoted)'"
+}()
 
 struct RecordOptions {
     var bundlePrefix = "com.google.Chrome"
     var outputDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     var duration: Double?
+    var transcriber: String?
 }
 
 func fail(_ message: String) -> Never {
@@ -41,6 +57,11 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
             guard let v = args.next(), let d = Double(v), d > 0, d.isFinite,
                   d * 1_000_000_000 < Double(UInt64.max) else { fail("--duration は正の数") }
             options.duration = d
+        case "--transcribe":
+            options.transcriber = defaultTranscriber
+        case "--transcriber":
+            guard let v = args.next(), !v.isEmpty else { fail("--transcriber に値がない") }
+            options.transcriber = v
         case "-h", "--help":
             print(usage)
             exit(0)
@@ -52,15 +73,20 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
 }
 
 /// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
-/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗も反映する。
+/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗、
+/// 文字起こしプロセスの異常終了も反映する。
 final class Termination: @unchecked Sendable {
     private let recorder: TwoTrackRecorder
+    private let transcribers: [(Track, TranscriberProcess)]
+    private let transcript: Transcript?
     private let lock = NSLock()
     private var exitCode: Int32 = 0
     private var finishing = false
 
-    init(recorder: TwoTrackRecorder) {
+    init(recorder: TwoTrackRecorder, transcribers: [(Track, TranscriberProcess)], transcript: Transcript?) {
         self.recorder = recorder
+        self.transcribers = transcribers
+        self.transcript = transcript
     }
 
     func finish(exitCode code: Int32) {
@@ -72,6 +98,24 @@ final class Termination: @unchecked Sendable {
         guard first else { return }
         Task.detached { [self] in
             let result = await recorder.stop()
+            // 録音を止めると入力が閉じられ、文字起こしプロセスは残りを処理してから終わる
+            var transcriberFailed = false
+            if !transcribers.isEmpty {
+                print("\n文字起こしの残りを処理中...")
+                for (track, transcriber) in transcribers {
+                    let exit = await transcriber.finish()
+                    if exit.status != 0 {
+                        fputs("[\(track.rawValue)] 文字起こしプロセスが終了コード \(exit.status) で終わった\n", stderr)
+                    }
+                    if exit.audioDropped {
+                        fputs("[\(track.rawValue)] 文字起こしプロセスに渡せなかった音声がある\n", stderr)
+                    }
+                    if exit.undecodableLines > 0 {
+                        fputs("[\(track.rawValue)] 文字起こしプロセスの出力のうち \(exit.undecodableLines) 行を読めなかった\n", stderr)
+                    }
+                    if !exit.succeeded { transcriberFailed = true }
+                }
+            }
             // 起動の失敗は stop() の結果から出す。Ctrl-C で先に終了処理が始まっていても取りこぼさない
             if let startError = result.startError {
                 fputs("error: \(startError)\n", stderr)
@@ -79,7 +123,14 @@ final class Termination: @unchecked Sendable {
             print("\n--- 結果 ---")
             print(result.app)
             print(result.mic)
+            var transcriptFailed = false
+            if let transcript {
+                let summary = transcript.close()
+                print(summary.description)
+                transcriptFailed = summary.failed
+            }
             let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
+                || transcriberFailed || transcriptFailed
             exit(lock.withLock { max(exitCode, failed ? 1 : 0) })
         }
     }
@@ -103,7 +154,34 @@ func record(_ options: RecordOptions) -> Never {
         micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav")
     )
 
-    let termination = Termination(recorder: recorder)
+    var transcribers: [(Track, TranscriberProcess)] = []
+    var transcript: Transcript?
+    if let command = options.transcriber {
+        let output: Transcript
+        do {
+            output = try Transcript(url: options.outputDir.appendingPathComponent("transcript-\(stamp).jsonl"))
+        } catch {
+            fail("文字起こしのファイルを作れない: \(error)")
+        }
+        for track in [Track.app, .mic] {
+            let transcriber = TranscriberProcess(
+                label: track.rawValue,
+                command: command,
+                environment: ["MEET_COPILOT_TRACK": track.rawValue]
+            ) { output.append($0, track: track) }
+            do {
+                try transcriber.start()
+            } catch {
+                fail("文字起こしプロセスを起動できない: \(error)")
+            }
+            transcribers.append((track, transcriber))
+        }
+        let byTrack = Dictionary(uniqueKeysWithValues: transcribers)
+        recorder.onBuffer = { track, buffer in byTrack[track]?.append(buffer) }
+        transcript = output
+    }
+
+    let termination = Termination(recorder: recorder, transcribers: transcribers, transcript: transcript)
     @Sendable func finish(exitCode: Int32) {
         termination.finish(exitCode: exitCode)
     }

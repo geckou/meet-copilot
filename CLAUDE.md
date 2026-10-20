@@ -26,10 +26,20 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - `Sources/meet-copilot/`：実行ターゲット。当面は CLI のサブコマンドのみ
 - `Tests/CaptureTests/`：`TrackWriter` の単体テスト（`swift test`）
 
-次は文字起こしの外部プロセスへの受け渡し。
+文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。
+
+- `Sources/Transcription/`：外部プロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
+- `scripts/transcribe_whisper.py`：音量で発話を区切って whisper-server に送る。標準ライブラリのみ
+- モデルは `models/`（git 管理外）
+
+実機で分かったこと（2026-10-20）：
+- Meet の相手側音声は発言の合間がほぼ無音（-88 dBFS）で、音量による区切りが効く。話し終わりから約1秒で結果が出る
+- BGM が途切れない音声（動画など）では区切れず、最大 15 秒まで溜まる
+- 「もしもし」程度の短い発言は、whisper が「お疲れ様でした」「そうですね」など言っていない文に置き換えることが多い
 
 未検証のまま残っている点：
 - ヘッドホンなしで Meet に出たときの回り込み。相手の声がマイクに入る。対策候補は AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）
+- 長めの文（質問）での文字起こし精度。静かな環境で確かめる
 
 ## ビルド構成
 
