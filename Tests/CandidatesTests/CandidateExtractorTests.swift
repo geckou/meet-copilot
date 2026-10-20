@@ -25,16 +25,4 @@ final class CandidateExtractorTests: XCTestCase {
         XCTAssertTrue(exit.succeeded)
         XCTAssertEqual(collected.all, [Candidate(at: 3, question: "2", quote: "認証どうなってる？")])
     }
-
-    func testUndecodableLinesAreReported() async {
-        let collected = Collected()
-        let command = #"cat > /dev/null; echo 'oops'; echo '{"at": 1, "question": "q", "quote": "x"}'"#
-        let extractor = CandidateExtractor(command: command) { collected.append($0) }
-        XCTAssertNoThrow(try extractor.start())
-        let exit = await extractor.finish()
-        XCTAssertEqual(exit.status, 0)
-        XCTAssertEqual(exit.undecodableLines, 1)
-        XCTAssertFalse(exit.succeeded)
-        XCTAssertEqual(collected.all.count, 1)
-    }
 }

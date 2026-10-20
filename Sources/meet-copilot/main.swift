@@ -4,6 +4,7 @@
 
 import Candidates
 import Capture
+import ExternalProcess
 import Foundation
 import Transcription
 
@@ -86,6 +87,20 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
     return options
 }
 
+/// 外部プロセスの終わり方のうち、失敗に当たるものを端末に出す。成功なら true。
+func report(_ exit: ProcessExit, of name: String) -> Bool {
+    if exit.status != 0 {
+        fputs("\(name)が終了コード \(exit.status) で終わった\n", stderr)
+    }
+    if exit.inputDropped {
+        fputs("\(name)に渡せなかった入力がある\n", stderr)
+    }
+    if exit.undecodableLines > 0 {
+        fputs("\(name)の出力のうち \(exit.undecodableLines) 行を読めなかった\n", stderr)
+    }
+    return exit.succeeded
+}
+
 /// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
 /// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗、
 /// 文字起こし・候補抽出プロセスの異常終了も反映する。
@@ -128,33 +143,14 @@ final class Termination: @unchecked Sendable {
                 print("\n文字起こしの残りを処理中...")
                 for (track, transcriber) in transcribers {
                     let exit = await transcriber.finish()
-                    if exit.status != 0 {
-                        fputs("[\(track.rawValue)] 文字起こしプロセスが終了コード \(exit.status) で終わった\n", stderr)
-                    }
-                    if exit.audioDropped {
-                        fputs("[\(track.rawValue)] 文字起こしプロセスに渡せなかった音声がある\n", stderr)
-                    }
-                    if exit.undecodableLines > 0 {
-                        fputs("[\(track.rawValue)] 文字起こしプロセスの出力のうち \(exit.undecodableLines) 行を読めなかった\n", stderr)
-                    }
-                    if !exit.succeeded { transcriberFailed = true }
+                    if !report(exit, of: "[\(track.rawValue)] 文字起こしプロセス") { transcriberFailed = true }
                 }
             }
             // 文字起こしが出し切られてから入力を閉じ、候補抽出プロセスは残りを処理してから終わる
             var extractorFailed = false
             if let extractor {
                 print("\n候補の抽出の残りを処理中...")
-                let exit = await extractor.finish()
-                if exit.status != 0 {
-                    fputs("候補抽出プロセスが終了コード \(exit.status) で終わった\n", stderr)
-                }
-                if exit.inputDropped {
-                    fputs("候補抽出プロセスに渡せなかった発言がある\n", stderr)
-                }
-                if exit.undecodableLines > 0 {
-                    fputs("候補抽出プロセスの出力のうち \(exit.undecodableLines) 行を読めなかった\n", stderr)
-                }
-                extractorFailed = !exit.succeeded
+                extractorFailed = !report(await extractor.finish(), of: "候補抽出プロセス")
             }
             // 起動の失敗は stop() の結果から出す。Ctrl-C で先に終了処理が始まっていても取りこぼさない
             if let startError = result.startError {
@@ -211,7 +207,6 @@ func record(_ options: RecordOptions) -> Never {
         }
         for track in [Track.app, .mic] {
             let transcriber = TranscriberProcess(
-                label: track.rawValue,
                 command: command,
                 environment: ["MEET_COPILOT_TRACK": track.rawValue]
             ) { output.append($0, track: track) }

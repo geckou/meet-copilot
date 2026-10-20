@@ -28,13 +28,14 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 
 文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。
 
-- `Sources/Transcription/`：外部プロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
+- `Sources/ExternalProcess/`：外部プロセスとの受け渡しの共通部分（`JSONLinesProcess`）。起動、標準入力への書き込み、1行1件の JSON の読み取り、終了待ち、失敗の集計。外部に処理を任せる部分を足すときはこれを使う
+- `Sources/Transcription/`：文字起こしプロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
 - `scripts/transcribe_whisper.py`：音量で発話を区切って whisper-server に送る。標準ライブラリのみ
 - モデルは `models/`（git 管理外）
 
 候補の抽出は `claude -p`（ツールなし、`--json-schema` で出力を固定）に決定（2026-10-20）。`record --candidates` で外部プロセス（`scripts/extract_candidates.py`）を起動し、文字起こしを1行ずつ渡して候補を JSON Lines で受け取る。
 
-- `Sources/Candidates/`：外部プロセスとの受け渡し（`CandidateExtractor`）
+- `Sources/Candidates/`：候補抽出プロセスとの受け渡し（`CandidateExtractor`）
 - `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。標準ライブラリのみ
 - 候補を押したらリポジトリを読みに行く部分（README の 5）は未着手
 

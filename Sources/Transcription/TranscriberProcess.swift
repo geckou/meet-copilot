@@ -1,17 +1,6 @@
 import AVFoundation
+import ExternalProcess
 import Foundation
-
-/// 文字起こしプロセスの終わり方。
-public struct TranscriberExit: Sendable {
-    /// プロセスの終了コード
-    public let status: Int32
-    /// プロセスが途中で入力を閉じるなどして、渡せなかった音声がある
-    public let audioDropped: Bool
-    /// 標準出力のうち、約束の JSON として読めずに捨てた行の数
-    public let undecodableLines: Int
-
-    public var succeeded: Bool { status == 0 && !audioDropped && undecodableLines == 0 }
-}
 
 /// 文字起こしプロセスが返す1件分の発話。時刻はそのプロセスに流し始めた時点からの秒数。
 public struct Utterance: Sendable, Decodable {
@@ -31,122 +20,45 @@ public struct Utterance: Sendable, Decodable {
 public final class TranscriberProcess: @unchecked Sendable {
     public static let sampleRate: Double = 16_000
 
-    private let process = Process()
-    private let stdinPipe = Pipe()
-    private let stdoutPipe = Pipe()
-    private let writeQueue: DispatchQueue
+    private let process: JSONLinesProcess<Utterance>
     private let outputFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true
     )!
-    private let onUtterance: @Sendable (Utterance) -> Void
-    private let readDone = DispatchGroup()
-    // 以下は append() を呼ぶ音声スレッドからのみ触る
+    // append() を呼ぶ音声スレッドからのみ触る。finish() は append() が止まってから呼ばれる
     private var converter: AVAudioConverter?
-    // 以下は writeQueue からのみ触る
-    private var writeFailed = false
-    // 読み取り用のスレッドからのみ触る。読み取りの終わり（readDone）を待ってから読む
-    private var undecodableLines = 0
 
     /// - Parameters:
     ///   - command: /bin/sh -c で実行するコマンド
     ///   - environment: 現在の環境変数に足す値
     ///   - onUtterance: 1件受け取るたびに呼ばれる。読み取り用のスレッドから呼ばれる
     public init(
-        label: String,
         command: String,
         environment: [String: String] = [:],
         onUtterance: @escaping @Sendable (Utterance) -> Void
     ) {
-        self.writeQueue = DispatchQueue(label: "transcriber.\(label).write")
-        self.onUtterance = onUtterance
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
-        process.environment = ProcessInfo.processInfo.environment.merging(environment) { $1 }
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = FileHandle.standardError
+        process = JSONLinesProcess(
+            name: "文字起こしプロセス", command: command, environment: environment, onOutput: onUtterance
+        )
     }
 
     public func start() throws {
-        // 子プロセスが先に終わったとき、パイプへの書き込みで SIGPIPE を受けて自分ごと落ちるのを防ぐ。
-        // 無視すると書き込みは EPIPE のエラーとして返る
-        signal(SIGPIPE, SIG_IGN)
-        try process.run()
-
-        readDone.enter()
-        let handle = stdoutPipe.fileHandleForReading
-        Thread.detachNewThread { [self] in
-            var pending = Data()
-            while true {
-                let chunk = handle.availableData
-                if chunk.isEmpty { break }
-                pending.append(chunk)
-                while let newline = pending.firstIndex(of: UInt8(ascii: "\n")) {
-                    let line = pending[pending.startIndex..<newline]
-                    pending.removeSubrange(pending.startIndex...newline)
-                    handleLine(line)
-                }
-            }
-            if !pending.isEmpty { handleLine(pending) }
-            readDone.leave()
-        }
+        try process.start()
     }
 
     /// 録音のバッファを 16kHz・モノラル・16bit に変換して標準入力に流す。
     /// 音声スレッドから同期で呼ぶ。書き込みは別キューで行うので、子プロセスが遅くてもここは詰まらない
     public func append(_ buffer: AVAudioPCMBuffer) {
         guard let data = convert(buffer), !data.isEmpty else { return }
-        enqueue(data)
-    }
-
-    private func enqueue(_ data: Data) {
-        let input = stdinPipe.fileHandleForWriting
-        writeQueue.async { [self] in
-            guard !writeFailed else { return }
-            do {
-                try input.write(contentsOf: data)
-            } catch {
-                writeFailed = true
-                fputs("文字起こしプロセスへの書き込み失敗。以降の音声は渡さない: \(error)\n", stderr)
-            }
-        }
+        process.write(data)
     }
 
     /// 変換器に残っている末尾を流してから標準入力を閉じ、残りの処理と出力の読み取りが終わるのを待つ。
     /// append() がもう呼ばれない状態（録音を止めた後）で呼ぶ。
-    public func finish() async -> TranscriberExit {
+    public func finish() async -> ProcessExit {
         if let converter, let tail = drain(converter), !tail.isEmpty {
-            enqueue(tail)
+            process.write(tail)
         }
-        let input = stdinPipe.fileHandleForWriting
-        let process = self.process
-        let readDone = self.readDone
-        return await withCheckedContinuation { continuation in
-            writeQueue.async { [self] in
-                let audioDropped = writeFailed
-                try? input.close()
-                DispatchQueue.global().async {
-                    process.waitUntilExit()
-                    readDone.wait()
-                    continuation.resume(returning: TranscriberExit(
-                        status: process.terminationStatus,
-                        audioDropped: audioDropped,
-                        undecodableLines: self.undecodableLines
-                    ))
-                }
-            }
-        }
-    }
-
-    private func handleLine(_ line: Data) {
-        guard line.contains(where: { !$0.isASCIIWhitespace }) else { return }
-        do {
-            onUtterance(try JSONDecoder().decode(Utterance.self, from: line))
-        } catch {
-            // 読めない行は捨てて続きを読むが、取りこぼしとして終了時に失敗にする
-            undecodableLines += 1
-            fputs("文字起こしプロセスの出力を読めない: \(String(decoding: line, as: UTF8.self))\n", stderr)
-        }
+        return await process.finish()
     }
 
     private func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
@@ -202,8 +114,4 @@ public final class TranscriberProcess: @unchecked Sendable {
             if status == .endOfStream || output.frameLength == 0 { return result }
         }
     }
-}
-
-private extension UInt8 {
-    var isASCIIWhitespace: Bool { self == 0x20 || self == 0x09 || self == 0x0A || self == 0x0D }
 }
