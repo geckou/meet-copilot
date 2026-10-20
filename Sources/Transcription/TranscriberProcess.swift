@@ -7,8 +7,10 @@ public struct TranscriberExit: Sendable {
     public let status: Int32
     /// プロセスが途中で入力を閉じるなどして、渡せなかった音声がある
     public let audioDropped: Bool
+    /// 標準出力のうち、約束の JSON として読めずに捨てた行の数
+    public let undecodableLines: Int
 
-    public var succeeded: Bool { status == 0 && !audioDropped }
+    public var succeeded: Bool { status == 0 && !audioDropped && undecodableLines == 0 }
 }
 
 /// 文字起こしプロセスが返す1件分の発話。時刻はそのプロセスに流し始めた時点からの秒数。
@@ -42,6 +44,8 @@ public final class TranscriberProcess: @unchecked Sendable {
     private var converter: AVAudioConverter?
     // 以下は writeQueue からのみ触る
     private var writeFailed = false
+    // 読み取り用のスレッドからのみ触る。読み取りの終わり（readDone）を待ってから読む
+    private var undecodableLines = 0
 
     /// - Parameters:
     ///   - command: /bin/sh -c で実行するコマンド
@@ -125,7 +129,9 @@ public final class TranscriberProcess: @unchecked Sendable {
                     process.waitUntilExit()
                     readDone.wait()
                     continuation.resume(returning: TranscriberExit(
-                        status: process.terminationStatus, audioDropped: audioDropped
+                        status: process.terminationStatus,
+                        audioDropped: audioDropped,
+                        undecodableLines: self.undecodableLines
                     ))
                 }
             }
@@ -137,6 +143,8 @@ public final class TranscriberProcess: @unchecked Sendable {
         do {
             onUtterance(try JSONDecoder().decode(Utterance.self, from: line))
         } catch {
+            // 読めない行は捨てて続きを読むが、取りこぼしとして終了時に失敗にする
+            undecodableLines += 1
             fputs("文字起こしプロセスの出力を読めない: \(String(decoding: line, as: UTF8.self))\n", stderr)
         }
     }

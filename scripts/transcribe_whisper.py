@@ -51,7 +51,17 @@ def parse_args():
     p.add_argument("--max-seconds", type=float, default=15.0, help="発話が続いてもこの秒数で区切る")
     p.add_argument("--min-seconds", type=float, default=0.3, help="これより短い発話は捨てる")
     p.add_argument("--pre-roll", type=float, default=0.3, help="発話の頭が欠けないよう、直前の音をこの秒数だけ含める")
-    return p.parse_args()
+    args = p.parse_args()
+    # inf や nan はフレーム数に直せず、区切りの処理が途中で落ちて終われなくなるので、起動前に弾く
+    if not math.isfinite(args.threshold_db):
+        p.error("--threshold-db は有限の数")
+    for name in ("silence", "max_seconds", "min_seconds"):
+        value = getattr(args, name)
+        if not (math.isfinite(value) and value > 0):
+            p.error(f"--{name.replace('_', '-')} は正の有限の数")
+    if not (math.isfinite(args.pre_roll) and args.pre_roll >= 0):
+        p.error("--pre-roll は 0 以上の有限の数")
+    return args
 
 
 # MARK: - whisper-server
@@ -135,6 +145,16 @@ def rms_db(frame):
 
 def segment_stdin(args, segments):
     """標準入力を 0.1 秒ずつ読み、発話のまとまりを (開始秒, PCM) で segments に積む。終わりに None を積む。"""
+    try:
+        read_segments(args, segments)
+    except Exception as error:  # noqa: BLE001 ここで落ちても None は積まないと main が終われない
+        log(f"音声の読み取り・区切りに失敗: {error}")
+        segments.put(("error", None))
+    finally:
+        segments.put(None)
+
+
+def read_segments(args, segments):
     pre_roll_frames = max(0, round(args.pre_roll / FRAME_SECONDS))
     silence_frames = max(1, round(args.silence / FRAME_SECONDS))
     max_frames = max(1, round(args.max_seconds / FRAME_SECONDS))
@@ -146,13 +166,19 @@ def segment_stdin(args, segments):
     voiced = 0  # current のうち発話と判定したフレーム数
     quiet = 0  # 末尾から続く静かなフレーム数
     index = 0
+    after_max_split = False  # 直前の区切りが最大長によるもので、まだ発話が途切れていない
+    continues_previous = False  # current が最大長で区切られた発話の続き
+    idle = 0  # 発話の外で続いている静かなフレーム数
 
-    def flush():
-        nonlocal current, recent, voiced, quiet
+    def flush(by_max):
+        nonlocal current, recent, voiced, quiet, after_max_split, idle
         # 末尾の静かな部分は送らない
         frames = current[: len(current) - quiet] if quiet < len(current) else current
-        if voiced >= min_frames:
+        # 最大長で区切った発話の続きは、短くても捨てない
+        if voiced >= min_frames or (continues_previous and voiced > 0):
             segments.put((current_start * FRAME_SECONDS, b"".join(frames)))
+        after_max_split = by_max
+        idle = quiet
         # 送らなかった末尾の静かな部分は、すぐ次の発話が始まったときの pre-roll に回す
         trailing = current[len(current) - quiet :] if quiet else []
         recent = trailing[-pre_roll_frames:] if pre_roll_frames else []
@@ -171,19 +197,25 @@ def segment_stdin(args, segments):
                 quiet = 0
             else:
                 quiet += 1
-            if quiet >= silence_frames or len(current) >= max_frames:
-                flush()
+            if quiet >= silence_frames:
+                flush(by_max=False)
+            elif len(current) >= max_frames:
+                flush(by_max=True)
         elif loud:
             current_start = index - len(recent)
             current = recent + [frame]
             recent = []
             voiced, quiet = 1, 0
+            continues_previous = after_max_split
         else:
             recent = (recent + [frame])[-pre_roll_frames:] if pre_roll_frames else []
+            # 区切りの後に静かな時間が続いたら、発話は途切れたとみなす
+            idle += 1
+            if idle >= silence_frames:
+                after_max_split = False
         index += 1
     if current:
-        flush()
-    segments.put(None)
+        flush(by_max=False)
 
 
 # MARK: - main
@@ -201,6 +233,9 @@ def main():
         threading.Thread(target=segment_stdin, args=(args, segments), daemon=True).start()
         while (item := segments.get()) is not None:
             start, pcm = item
+            if pcm is None:  # 区切りの処理が失敗した
+                failures += 1
+                continue
             end = start + len(pcm) / 2 / SAMPLE_RATE
             try:
                 text = transcribe(url, pcm)

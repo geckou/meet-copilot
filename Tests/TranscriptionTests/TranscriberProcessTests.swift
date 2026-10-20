@@ -55,6 +55,19 @@ final class TranscriberProcessTests: XCTestCase {
         XCTAssertFalse(exit.succeeded)
     }
 
+    /// 読めない行は捨てて続きを読み、正常終了でも失敗として返す
+    func testUndecodableLinesAreReported() async {
+        let collected = Collected()
+        let command = #"cat > /dev/null; echo 'not json'; echo '{"start": 0}'; echo '{"start": 1, "end": 2, "text": "ok"}'"#
+        let transcriber = TranscriberProcess(label: "test", command: command) { collected.append($0) }
+        XCTAssertNoThrow(try transcriber.start())
+        let exit = await transcriber.finish()
+        XCTAssertEqual(exit.status, 0)
+        XCTAssertEqual(exit.undecodableLines, 2)
+        XCTAssertFalse(exit.succeeded)
+        XCTAssertEqual(collected.all.map(\.text), ["ok"])
+    }
+
     /// 途中で入力を閉じて正常終了するプロセスでも、渡せなかった音声があれば失敗として返す
     func testDroppedAudioIsReportedEvenIfProcessSucceeds() async throws {
         let transcriber = TranscriberProcess(label: "test", command: "head -c 100 > /dev/null; exit 0") { _ in }

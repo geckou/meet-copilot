@@ -110,6 +110,9 @@ final class Termination: @unchecked Sendable {
                     if exit.audioDropped {
                         fputs("[\(track.rawValue)] 文字起こしプロセスに渡せなかった音声がある\n", stderr)
                     }
+                    if exit.undecodableLines > 0 {
+                        fputs("[\(track.rawValue)] 文字起こしプロセスの出力のうち \(exit.undecodableLines) 行を読めなかった\n", stderr)
+                    }
                     if !exit.succeeded { transcriberFailed = true }
                 }
             }
