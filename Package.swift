@@ -10,8 +10,11 @@ let package = Package(
         .target(name: "Capture"),
         // 外部の文字起こしプロセスとの受け渡し。文字起こし自体は外部（scripts/）に任せる
         .target(name: "Transcription"),
-        .executableTarget(name: "meet-copilot", dependencies: ["Capture", "Transcription"]),
+        // 外部の候補抽出プロセスとの受け渡し。抽出自体は外部（scripts/）に任せる
+        .target(name: "Candidates"),
+        .executableTarget(name: "meet-copilot", dependencies: ["Capture", "Transcription", "Candidates"]),
         .testTarget(name: "CaptureTests", dependencies: ["Capture"]),
         .testTarget(name: "TranscriptionTests", dependencies: ["Transcription"]),
+        .testTarget(name: "CandidatesTests", dependencies: ["Candidates"]),
     ]
 )

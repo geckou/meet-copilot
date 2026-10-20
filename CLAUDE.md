@@ -32,6 +32,12 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - `scripts/transcribe_whisper.py`：音量で発話を区切って whisper-server に送る。標準ライブラリのみ
 - モデルは `models/`（git 管理外）
 
+候補の抽出は `claude -p`（ツールなし、`--json-schema` で出力を固定）に決定（2026-10-20）。`record --candidates` で外部プロセス（`scripts/extract_candidates.py`）を起動し、文字起こしを1行ずつ渡して候補を JSON Lines で受け取る。
+
+- `Sources/Candidates/`：外部プロセスとの受け渡し（`CandidateExtractor`）
+- `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。標準ライブラリのみ
+- 候補を押したらリポジトリを読みに行く部分（README の 5）は未着手
+
 実機で分かったこと（2026-10-20）：
 - Meet の相手側音声は発言の合間がほぼ無音（-88 dBFS）で、音量による区切りが効く。話し終わりから約1秒で結果が出る
 - BGM が途切れない音声（動画など）では区切れず、最大 15 秒まで溜まる
