@@ -32,6 +32,8 @@ SAMPLE_RATE = 16_000
 FRAME_SECONDS = 0.1
 FRAME_BYTES = int(SAMPLE_RATE * FRAME_SECONDS) * 2
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 送り先は自分で立てた whisper-server だけ。環境変数のプロキシを通すと会議の音声が外に出うるので使わない
+HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def log(message):
@@ -81,7 +83,7 @@ def start_server(args):
             log(f"whisper-server が起動直後に終了した（終了コード {server.returncode}）")
             sys.exit(1)
         try:
-            urllib.request.urlopen(url, timeout=1).close()
+            HTTP.open(url, timeout=1).close()
             log(f"whisper-server 起動: {url}")
             return server, url
         except (urllib.error.URLError, ConnectionError, TimeoutError):
@@ -112,7 +114,7 @@ def transcribe(url, pcm):
         data=b"".join(parts),
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with HTTP.open(request, timeout=120) as response:
         text = json.load(response).get("text", "")
     # whisper の内部の区切りごとに改行が入るので、1件1行に収める
     return " ".join(line.strip() for line in text.splitlines() if line.strip())

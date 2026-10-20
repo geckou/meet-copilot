@@ -103,11 +103,14 @@ final class Termination: @unchecked Sendable {
             if !transcribers.isEmpty {
                 print("\n文字起こしの残りを処理中...")
                 for (track, transcriber) in transcribers {
-                    let status = await transcriber.finish()
-                    if status != 0 {
-                        fputs("[\(track.rawValue)] 文字起こしプロセスが終了コード \(status) で終わった\n", stderr)
-                        transcriberFailed = true
+                    let exit = await transcriber.finish()
+                    if exit.status != 0 {
+                        fputs("[\(track.rawValue)] 文字起こしプロセスが終了コード \(exit.status) で終わった\n", stderr)
                     }
+                    if exit.audioDropped {
+                        fputs("[\(track.rawValue)] 文字起こしプロセスに渡せなかった音声がある\n", stderr)
+                    }
+                    if !exit.succeeded { transcriberFailed = true }
                 }
             }
             // 起動の失敗は stop() の結果から出す。Ctrl-C で先に終了処理が始まっていても取りこぼさない

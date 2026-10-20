@@ -37,20 +37,35 @@ final class TranscriberProcessTests: XCTestCase {
         for _ in 0..<4 {
             transcriber.append(buffer(sampleRate: 48_000, channels: 2, seconds: 0.5))
         }
-        let status = await transcriber.finish()
+        let exit = await transcriber.finish()
 
-        XCTAssertEqual(status, 0)
+        XCTAssertTrue(exit.succeeded)
         XCTAssertEqual(collected.all.count, 1)
         XCTAssertEqual(collected.all.first?.text, "app")
-        // サンプルレート変換の遅延（実測 約 37ms、累積しない）の分だけ末尾が欠ける
-        XCTAssertEqual(collected.all.first?.end ?? 0, 2.0, accuracy: 0.05)
+        // 終了時に変換器の末尾も流すので、欠けずに 2 秒分届く
+        XCTAssertEqual(collected.all.first?.end ?? 0, 2.0, accuracy: 0.002)
     }
 
     func testNonZeroExitIsReported() async {
         let transcriber = TranscriberProcess(label: "test", command: "cat > /dev/null; exit 3") { _ in }
         XCTAssertNoThrow(try transcriber.start())
         transcriber.append(buffer(sampleRate: 44_100, channels: 1, seconds: 0.1))
-        let status = await transcriber.finish()
-        XCTAssertEqual(status, 3)
+        let exit = await transcriber.finish()
+        XCTAssertEqual(exit.status, 3)
+        XCTAssertFalse(exit.succeeded)
+    }
+
+    /// 途中で入力を閉じて正常終了するプロセスでも、渡せなかった音声があれば失敗として返す
+    func testDroppedAudioIsReportedEvenIfProcessSucceeds() async throws {
+        let transcriber = TranscriberProcess(label: "test", command: "head -c 100 > /dev/null; exit 0") { _ in }
+        XCTAssertNoThrow(try transcriber.start())
+        transcriber.append(buffer(sampleRate: 48_000, channels: 2, seconds: 0.1))
+        // プロセスが終わってから書き込ませる
+        try await Task.sleep(nanoseconds: 500_000_000)
+        transcriber.append(buffer(sampleRate: 48_000, channels: 2, seconds: 0.1))
+        let exit = await transcriber.finish()
+        XCTAssertEqual(exit.status, 0)
+        XCTAssertTrue(exit.audioDropped)
+        XCTAssertFalse(exit.succeeded)
     }
 }

@@ -1,6 +1,16 @@
 import AVFoundation
 import Foundation
 
+/// 文字起こしプロセスの終わり方。
+public struct TranscriberExit: Sendable {
+    /// プロセスの終了コード
+    public let status: Int32
+    /// プロセスが途中で入力を閉じるなどして、渡せなかった音声がある
+    public let audioDropped: Bool
+
+    public var succeeded: Bool { status == 0 && !audioDropped }
+}
+
 /// 文字起こしプロセスが返す1件分の発話。時刻はそのプロセスに流し始めた時点からの秒数。
 public struct Utterance: Sendable, Decodable {
     public let start: Double
@@ -82,6 +92,10 @@ public final class TranscriberProcess: @unchecked Sendable {
     /// 音声スレッドから同期で呼ぶ。書き込みは別キューで行うので、子プロセスが遅くてもここは詰まらない
     public func append(_ buffer: AVAudioPCMBuffer) {
         guard let data = convert(buffer), !data.isEmpty else { return }
+        enqueue(data)
+    }
+
+    private func enqueue(_ data: Data) {
         let input = stdinPipe.fileHandleForWriting
         writeQueue.async { [self] in
             guard !writeFailed else { return }
@@ -94,18 +108,25 @@ public final class TranscriberProcess: @unchecked Sendable {
         }
     }
 
-    /// 標準入力を閉じ、残りの処理と出力の読み取りが終わるのを待つ。返り値は終了コード。
-    public func finish() async -> Int32 {
+    /// 変換器に残っている末尾を流してから標準入力を閉じ、残りの処理と出力の読み取りが終わるのを待つ。
+    /// append() がもう呼ばれない状態（録音を止めた後）で呼ぶ。
+    public func finish() async -> TranscriberExit {
+        if let converter, let tail = drain(converter), !tail.isEmpty {
+            enqueue(tail)
+        }
         let input = stdinPipe.fileHandleForWriting
         let process = self.process
         let readDone = self.readDone
         return await withCheckedContinuation { continuation in
-            writeQueue.async {
+            writeQueue.async { [self] in
+                let audioDropped = writeFailed
                 try? input.close()
                 DispatchQueue.global().async {
                     process.waitUntilExit()
                     readDone.wait()
-                    continuation.resume(returning: process.terminationStatus)
+                    continuation.resume(returning: TranscriberExit(
+                        status: process.terminationStatus, audioDropped: audioDropped
+                    ))
                 }
             }
         }
@@ -121,7 +142,10 @@ public final class TranscriberProcess: @unchecked Sendable {
     }
 
     private func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
+        var head = Data()
         if converter == nil || converter?.inputFormat != buffer.format {
+            // 入力形式が変わったら、前の変換器の末尾を流してから作り直す
+            if let converter, let tail = drain(converter) { head = tail }
             converter = AVAudioConverter(from: buffer.format, to: outputFormat)
             // 2ch→1ch で片方を捨てずに混ぜる
             converter?.downmix = true
@@ -147,9 +171,28 @@ public final class TranscriberProcess: @unchecked Sendable {
         }
         guard status != .error, let samples = output.int16ChannelData else {
             fputs("文字起こし用の変換失敗: \(error.map { "\($0)" } ?? "unknown")\n", stderr)
-            return nil
+            return head.isEmpty ? nil : head
         }
-        return Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size)
+        return head + Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size)
+    }
+
+    /// 変換器の中に残っている末尾（サンプルレート変換の遅延分）を出し切る。以降その変換器は使えない
+    private func drain(_ converter: AVAudioConverter) -> Data? {
+        var result = Data()
+        while true {
+            guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4096) else { return nil }
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, inputStatus in
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            guard status != .error, let samples = output.int16ChannelData else {
+                fputs("文字起こし用の変換失敗: \(error.map { "\($0)" } ?? "unknown")\n", stderr)
+                return result
+            }
+            result.append(Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size))
+            if status == .endOfStream || output.frameLength == 0 { return result }
+        }
     }
 }
 
