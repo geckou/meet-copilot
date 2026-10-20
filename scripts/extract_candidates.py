@@ -91,10 +91,15 @@ def parse_args():
 
 def find_claude(explicit):
     """claude の実行ファイルを探す。nvm で入れた場合は PATH に無いことがあるので、よくある置き場所も見る。"""
+    # claude は一時ディレクトリを作業ディレクトリにして動かすので、相対パスはここで絶対パスにしておく
     if explicit:
-        return explicit
-    if found := shutil.which("claude"):
+        found = os.path.abspath(explicit) if os.sep in explicit else shutil.which(explicit)
+        if not found or not os.access(found, os.X_OK):
+            log(f"claude として指定された実行ファイルがない: {explicit}")
+            sys.exit(1)
         return found
+    if found := shutil.which("claude"):
+        return os.path.abspath(found)
     home = os.path.expanduser("~")
     candidates = [
         os.path.join(home, ".claude", "local", "claude"),

@@ -1,0 +1,6 @@
+{"speaker":"相手","track":"app","start":2.0,"end":4.5,"text":"お疲れさまです。今日はリリース前の確認なんですけど"}
+{"speaker":"自分","track":"mic","start":5.0,"end":6.0,"text":"はい、お願いします"}
+{"speaker":"相手","track":"app","start":7.0,"end":11.0,"text":"ログインのところって、今トークンの有効期限どれくらいになってましたっけ？"}
+{"speaker":"自分","track":"mic","start":12.0,"end":15.0,"text":"えーと、たしか、ちょっと確認しますね"}
+{"speaker":"相手","track":"app","start":16.0,"end":18.0,"text":"そうですね"}
+{"speaker":"相手","track":"app","start":19.0,"end":24.0,"text":"あとリフレッシュトークンってDBに保存してるんでしたっけ、それともRedis？"}

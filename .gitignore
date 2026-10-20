@@ -5,3 +5,4 @@
 models/
 recordings/
 __pycache__/
+!scripts/testdata/*.jsonl
