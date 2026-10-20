@@ -12,9 +12,11 @@ meet-copilot record --candidates から1つ起動される。
 """
 
 import argparse
+import glob
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -78,12 +80,40 @@ def positive(value):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--claude-bin", default="claude")
+    p.add_argument("--claude-bin", default=os.environ.get("MEET_COPILOT_CLAUDE"),
+                   help="claude の実行ファイル。省略時は PATH とよくある置き場所から探す（環境変数 MEET_COPILOT_CLAUDE でも指定可）")
     p.add_argument("--model", default="sonnet")
     p.add_argument("--settle", type=positive, default=2.0, help="相手の最後の発言からこの秒数だけ新しい発言がなければ抽出する")
     p.add_argument("--window", type=positive, default=180.0, help="最新の発言からこの秒数分さかのぼったやり取りを渡す")
     p.add_argument("--timeout", type=positive, default=120.0, help="claude -p 1回の上限秒数")
     return p.parse_args()
+
+
+def find_claude(explicit):
+    """claude の実行ファイルを探す。nvm で入れた場合は PATH に無いことがあるので、よくある置き場所も見る。"""
+    if explicit:
+        return explicit
+    if found := shutil.which("claude"):
+        return found
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, ".claude", "local", "claude"),
+        os.path.join(home, ".local", "bin", "claude"),
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+    ]
+
+    def node_version(path):
+        version = path.split(os.sep)[-3].lstrip("v")
+        return tuple(int(part) if part.isdigit() else 0 for part in version.split("."))
+
+    # 新しい node のものを優先する
+    candidates += sorted(glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin", "claude")), key=node_version, reverse=True)
+    for path in candidates:
+        if os.access(path, os.X_OK):
+            return path
+    log("claude が見つからない。--claude-bin か環境変数 MEET_COPILOT_CLAUDE で場所を指定する")
+    sys.exit(1)
 
 
 def format_time(seconds):
@@ -123,6 +153,8 @@ def run_claude(args, prompt, workdir):
         cwd=workdir,
         # 端末の Ctrl-C は録音側が受ける。抽出中の claude まで止まらないよう別グループにする
         start_new_session=True,
+        # nvm で入れた claude は同じ場所の node で動くので、その場所を PATH の先頭に足す
+        env={**os.environ, "PATH": os.path.dirname(args.claude_bin) + os.pathsep + os.environ.get("PATH", "")},
     )
     try:
         response = json.loads(result.stdout)
@@ -189,6 +221,7 @@ class Conversation:
 def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = parse_args()
+    args.claude_bin = find_claude(args.claude_bin)
     conversation = Conversation()
     threading.Thread(target=conversation.read, args=(sys.stdin,), daemon=True).start()
 
