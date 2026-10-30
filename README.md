@@ -113,6 +113,19 @@ swift run meet-copilot record --transcribe --candidates --out ./recordings
 - スクリプト単体の確認：`python3 scripts/extract_candidates.py < scripts/testdata/conversation.jsonl`
 - 抽出の仕組みは `--extractor <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateExtractor.swift` の冒頭を参照
 
+### 候補を調べる（claude -p）
+
+録音とは別のターミナルで動かす。
+
+```sh
+swift run meet-copilot answer --repo ~/path/to/repo --out ./recordings
+```
+
+- `--out` の中でいちばん新しい `candidates-<日時>.jsonl` の候補を番号付きで並べる。Enter で一覧を更新、番号で調べる、`q` で終了
+- 選んだ候補だけ、前後 2 分半のやり取りを添えて `claude -p` に渡す。ツールは Read / Grep / Glob のみ（読み取りだけ）で、1つ目の `--repo` を作業ディレクトリ、残りを `--add-dir` にする
+- 答えは会議でそのまま言える 2〜4 文と、根拠のファイル・行、確度（high / medium / low）。端末に出し、`answers-<日時>.jsonl` に書き足す。調べ終えた候補には ✓ が付く
+- 調べる仕組みは `--answerer <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateAnswerer.swift` の冒頭を参照
+
 ## 最初のタスク
 
 ScreenCaptureKit の2トラック取得の検証。Swift の実行ファイル1本で、アプリ音声とマイクを別ファイルに書き出すところまで。ここが通れば残りは繋ぎ込み。

@@ -1,6 +1,7 @@
 // meet-copilot の本体。当面はターミナルから swift run で起動する。
 //
 // run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe] [--candidates]
+//      swift run meet-copilot answer --repo <path> [--repo <path>...] [--out <dir>]
 
 import Candidates
 import Capture
@@ -12,6 +13,7 @@ let usage = """
 usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
                            [--transcribe | --transcriber <command>]
                            [--candidates | --extractor <command>]
+       meet-copilot answer --repo <path> [--repo <path>...] [--out <dir>] [--answerer <command>]
 
 record  アプリ音声（相手）とマイク（自分）を別々の WAV に書き出す
   --app          対象アプリの bundle id 前方一致（既定: com.google.Chrome、空文字で全アプリ）
@@ -23,16 +25,24 @@ record  アプリ音声（相手）とマイク（自分）を別々の WAV に�
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
                  candidates-<日時>.jsonl に書く。--transcribe か --transcriber が要る
   --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
+
+answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリを claude -p（scripts/answer_question.py）で調べて答える。
+        record とは別のターミナルで動かす。答えは answers-<日時>.jsonl に書き足す
+  --repo         調べるリポジトリ。複数指定できる。1つ目を claude の作業ディレクトリにする
+  --out          record の出力ディレクトリ（既定: カレントディレクトリ）。いちばん新しい candidates-<日時>.jsonl を使う
+  --answerer     調べるのに使うコマンド（/bin/sh -c で実行）。指定したときは --repo を渡さない
 """
+
+/// シェルのシングルクォートで囲む。中の ' は '\'' に置き換える
+func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
 
 /// scripts/ 以下のスクリプトを python3 で動かすコマンド。swift run で動かす前提なので、ソースの場所からリポジトリを辿る
 func scriptCommand(_ name: String) -> String {
     let repo = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    let script = repo.appendingPathComponent("scripts/\(name)").path
-    // シングルクォートで囲むので、パス中の ' は '\'' に置き換える
-    let quoted = script.replacingOccurrences(of: "'", with: "'\\''")
-    return "exec python3 '\(quoted)'"
+    return "exec python3 " + shellQuote(repo.appendingPathComponent("scripts/\(name)").path)
 }
 
 struct RecordOptions {
@@ -291,6 +301,8 @@ let arguments = CommandLine.arguments.dropFirst()
 switch arguments.first {
 case "record":
     record(parseRecordOptions(arguments.dropFirst()))
+case "answer":
+    answer(parseAnswerOptions(arguments.dropFirst()))
 case "-h", "--help", nil:
     print(usage)
     exit(arguments.isEmpty ? 1 : 0)

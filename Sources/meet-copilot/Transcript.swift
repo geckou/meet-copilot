@@ -2,27 +2,16 @@ import Capture
 import Foundation
 import Transcription
 
-/// 録音開始からの秒数を [mm:ss.s] の形にする。
-func formatTime(_ seconds: Double) -> String {
-    let minutes = Int(seconds) / 60
-    return String(format: "%02d:%04.1f", minutes, seconds - Double(minutes * 60))
-}
-
 /// 2トラック分の文字起こし結果に話者ラベルを付け、端末に流しつつ JSON Lines のファイルに書き足す。
 /// 時刻は録音開始（2トラックの書き込み開始）からの秒数で、2トラックで揃っている。
 final class Transcript: @unchecked Sendable {
-    let url: URL
+    private let file: JSONLinesFile
     private let queue = DispatchQueue(label: "transcript")
-    private let handle: FileHandle
-    private var count = 0
-    private var writeError: Error?
     /// 1件ごとに、ファイルに書くのと同じ JSON（改行なし）を受け取る。届いた順に、同期で呼ばれる
     var onRecord: ((Data) -> Void)?
 
     init(url: URL) throws {
-        self.url = url
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        self.handle = try FileHandle(forWritingTo: url)
+        file = try JSONLinesFile(url: url, name: "transcript")
     }
 
     static func speaker(of track: Track) -> String {
@@ -44,34 +33,16 @@ final class Transcript: @unchecked Sendable {
                 "end": utterance.end,
                 "text": utterance.text,
             ]
-            do {
-                let line = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
-                onRecord?(line)
-                try handle.write(contentsOf: line + [UInt8(ascii: "\n")])
-                count += 1
-            } catch {
-                // 端末には出ているので続けるが、ファイルが欠けたことは終了時に失敗として扱う
-                if writeError == nil { writeError = error }
-                fputs("文字起こしの書き込み失敗: \(error)\n", stderr)
+            guard let line = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]) else {
+                return
             }
+            onRecord?(line)
+            file.append(line)
         }
     }
 
     /// ファイルを閉じて概要を返す。書き込みに1回でも失敗していれば failed になる。
     func close() -> (description: String, failed: Bool) {
-        queue.sync {
-            var failed = writeError != nil
-            do {
-                try handle.close()
-            } catch {
-                if writeError == nil { writeError = error }
-                failed = true
-            }
-            var description = "[transcript] \(count) 件, \(url.path)"
-            if let writeError {
-                description += "\n  書き込み失敗で欠けている: \(writeError)"
-            }
-            return (description, failed)
-        }
+        file.close()
     }
 }
