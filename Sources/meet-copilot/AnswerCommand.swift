@@ -54,10 +54,21 @@ private struct Meeting {
     let transcriptURL: URL
     let answersURL: URL
 
-    /// 出力ディレクトリのうち、いちばん新しい録音。ファイル名の <日時> は時刻順に並ぶ
+    /// 出力ディレクトリのうち、いちばん新しい録音。<日時> は「秒までの日時-ランダムな接尾辞」なので、
+    /// 秒までの日時で比べ、同じ秒ならファイルの作成日時で比べる
     static func latest(in dir: URL) -> Meeting? {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        guard let name = names.filter({ $0.hasPrefix("candidates-") && $0.hasSuffix(".jsonl") }).max() else { return nil }
+        let secondPrefix = "candidates-yyyyMMdd-HHmmss".count
+        func created(_ name: String) -> Date {
+            let path = dir.appendingPathComponent(name).path
+            return (try? FileManager.default.attributesOfItem(atPath: path)[.creationDate] as? Date) ?? .distantPast
+        }
+        let candidateFiles = names.filter { $0.hasPrefix("candidates-") && $0.hasSuffix(".jsonl") }
+        guard let name = candidateFiles.max(by: { a, b in
+            let (secondA, secondB) = (a.prefix(secondPrefix), b.prefix(secondPrefix))
+            if secondA != secondB { return secondA < secondB }
+            return (created(a), a) < (created(b), b)
+        }) else { return nil }
         let stamp = String(name.dropFirst("candidates-".count).dropLast(".jsonl".count))
         return Meeting(
             stamp: stamp,
@@ -249,16 +260,17 @@ func answer(_ options: AnswerOptions) -> Never {
         print("調べる対象: " + options.repos.joined(separator: ", "))
     }
 
-    // q・入力の終わり・Ctrl-C のどれでも、受け取った問いを調べ終えてから閉じる
+    // q・入力の終わり・Ctrl-C・調査プロセスの終了のどれでも、受け取った問いを調べ終えてから閉じる。
+    // 問いの送信も finishing の中で行い、終了処理が始まった後は新しい問いを渡さない
     let finishing = NSLock()
     nonisolated(unsafe) var finished = false
-    @Sendable func finish() {
+    @Sendable func finish(exitCode: Int32 = 0) {
         guard finishing.withLock({ defer { finished = true }; return !finished }) else { return }
         print("\n調査の残りを処理中...")
         Task.detached {
             let succeeded = report(await answerer.finish(), of: "調査プロセス")
             let closed = session.close()
-            exit(succeeded && closed ? 0 : 1)
+            exit(succeeded && closed ? exitCode : 1)
         }
     }
 
@@ -266,6 +278,14 @@ func answer(_ options: AnswerOptions) -> Never {
     let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     sigint.setEventHandler { finish() }
     sigint.resume()
+
+    // 調査プロセスが先に終わったら（claude が見つからないなど）、問いを受けても答えは返らないので終える
+    Task.detached {
+        await answerer.waitForExit()
+        let unexpected = finishing.withLock { !finished }
+        if unexpected { fputs("\n調査プロセスが終了した\n", stderr) }
+        DispatchQueue.main.async { finish(exitCode: unexpected ? 1 : 0) }
+    }
 
     // 入力待ちで止まるので別スレッドで読む。メインは Ctrl-C を受けるために空けておく
     Thread.detachNewThread {
@@ -281,14 +301,22 @@ func answer(_ options: AnswerOptions) -> Never {
                 session.printList()
                 continue
             }
-            switch Int(line).map(session.select(number:)) ?? .outOfRange {
-            case .request(let request):
-                print("調査中: \(request.question)")
-                answerer.ask(request)
-            case .inProgress(let question):
-                print("まだ調査中: \(question)")
-            case .outOfRange:
-                print("一覧の番号を入れる: \(line)")
+            let accepted = finishing.withLock {
+                guard !finished else { return false }
+                switch Int(line).map(session.select(number:)) ?? .outOfRange {
+                case .request(let request):
+                    print("調査中: \(request.question)")
+                    answerer.ask(request)
+                case .inProgress(let question):
+                    print("まだ調査中: \(question)")
+                case .outOfRange:
+                    print("一覧の番号を入れる: \(line)")
+                }
+                return true
+            }
+            if !accepted {
+                print("終了処理中のため受け付けない: \(line)")
+                return
             }
         }
         DispatchQueue.main.async { finish() }

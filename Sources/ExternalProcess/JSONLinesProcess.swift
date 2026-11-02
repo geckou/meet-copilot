@@ -105,6 +105,19 @@ public final class JSONLinesProcess<Output: Decodable & Sendable>: @unchecked Se
         }
     }
 
+    /// 子プロセスが終わり、出力を読み終えるのを待つ。標準入力は閉じない。実行中に子プロセスが終わったことに気づくため
+    public func waitForExit() async {
+        let readDone = self.readDone
+        let exited = self.exited
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                exited.wait()
+                readDone.wait()
+                continuation.resume()
+            }
+        }
+    }
+
     /// それまでに write() したものを書き終えてから標準入力を閉じ、子プロセスの終了と出力の読み取りが終わるのを待つ。
     public func finish() async -> ProcessExit {
         let input = stdinPipe.fileHandleForWriting

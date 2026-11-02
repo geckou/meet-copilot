@@ -102,6 +102,11 @@ public final class CandidateAnswerer: @unchecked Sendable {
         process.write(line + [UInt8(ascii: "\n")])
     }
 
+    /// 調査プロセスが終わるのを待つ。標準入力は閉じない
+    public func waitForExit() async {
+        await process.waitForExit()
+    }
+
     /// 標準入力を閉じ、受け取った問いの処理と出力の読み取りが終わるのを待つ。
     public func finish() async -> ProcessExit {
         await process.finish()
