@@ -22,11 +22,15 @@ final class JSONLinesFile: @unchecked Sendable {
         self.url = url
         self.name = name
         self.queue = DispatchQueue(label: "jsonl.\(name)")
-        if !appending || !FileManager.default.fileExists(atPath: url.path) {
+        if appending {
+            // 書くたびに末尾へ。同じファイルに別のプロセスが書き足していても、その行を上書きしない
+            let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+            guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            self.handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        } else {
             FileManager.default.createFile(atPath: url.path, contents: nil)
+            self.handle = try FileHandle(forWritingTo: url)
         }
-        self.handle = try FileHandle(forWritingTo: url)
-        if appending { try handle.seekToEnd() }
     }
 
     /// JSON 1件（改行なし）を書き足す。呼んだ順に書かれる。

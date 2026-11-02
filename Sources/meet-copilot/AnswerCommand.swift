@@ -135,19 +135,27 @@ private final class AnswerSession: @unchecked Sendable {
         }
     }
 
-    /// 番号の候補を調査プロセスに渡す形にする。番号は最後に表示した一覧のもの。範囲外なら nil
-    func request(number: Int) -> AnswerRequest? {
+    enum Selection {
+        case request(AnswerRequest)
+        /// 調べている途中。同じ問いを二重に渡さない
+        case inProgress(String)
+        case outOfRange
+    }
+
+    /// 番号の候補を調査プロセスに渡す形にする。番号は最後に表示した一覧のもの
+    func select(number: Int) -> Selection {
         lock.withLock {
-            guard let meeting, candidates.indices.contains(number - 1) else { return nil }
+            guard let meeting, candidates.indices.contains(number - 1) else { return .outOfRange }
             let candidate = candidates[number - 1]
+            let key = Self.key(candidate.at, candidate.question)
+            if inProgress.contains(key) { return .inProgress(candidate.question) }
             let range = (candidate.at - Self.contextBefore)...(candidate.at + Self.contextAfter)
             let context = JSONLinesFile.read(TranscriptRow.self, from: meeting.transcriptURL)
                 .filter { range.contains($0.start) }
                 .map { AnswerRequest.Utterance(speaker: $0.speaker, start: $0.start, text: $0.text) }
-            let key = Self.key(candidate.at, candidate.question)
             inProgress.insert(key)
             failed.remove(key)
-            return AnswerRequest(meeting: meeting.stamp, candidate: candidate, context: context)
+            return .request(AnswerRequest(meeting: meeting.stamp, candidate: candidate, context: context))
         }
     }
 
@@ -273,12 +281,15 @@ func answer(_ options: AnswerOptions) -> Never {
                 session.printList()
                 continue
             }
-            guard let number = Int(line), let request = session.request(number: number) else {
+            switch Int(line).map(session.select(number:)) ?? .outOfRange {
+            case .request(let request):
+                print("調査中: \(request.question)")
+                answerer.ask(request)
+            case .inProgress(let question):
+                print("まだ調査中: \(question)")
+            case .outOfRange:
                 print("一覧の番号を入れる: \(line)")
-                continue
             }
-            print("調査中: \(request.question)")
-            answerer.ask(request)
         }
         DispatchQueue.main.async { finish() }
     }
