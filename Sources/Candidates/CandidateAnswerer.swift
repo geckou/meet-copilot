@@ -15,12 +15,15 @@ public struct AnswerRequest: Sendable, Encodable {
         }
     }
 
+    /// 問いを出した録音（ファイル名の <日時>）。答えにそのまま返してもらい、保存先を決める
+    public let meeting: String
     public let at: Double
     public let question: String
     public let quote: String
     public let context: [Utterance]
 
-    public init(candidate: Candidate, context: [Utterance]) {
+    public init(meeting: String, candidate: Candidate, context: [Utterance]) {
+        self.meeting = meeting
         self.at = candidate.at
         self.question = candidate.question
         self.quote = candidate.quote
@@ -36,6 +39,8 @@ public struct Answer: Sendable, Codable {
         public let line: Int?
     }
 
+    /// 問いを出した録音。古い answers ファイルの行には無い
+    public let meeting: String?
     public let at: Double
     public let question: String
     /// 会議でそのまま口にできる形の答え
@@ -45,21 +50,45 @@ public struct Answer: Sendable, Codable {
     public let sources: [Source]
 }
 
+/// 調べられなかった問い1件。
+public struct AnswerFailure: Sendable, Codable {
+    public let meeting: String?
+    public let at: Double
+    public let question: String
+    public let error: String
+}
+
+/// 調査プロセスの出力1行。`error` があれば失敗、無ければ答え。
+public enum AnswerResult: Sendable, Decodable {
+    case answered(Answer)
+    case failed(AnswerFailure)
+
+    public init(from decoder: Decoder) throws {
+        if let failure = try? AnswerFailure(from: decoder) {
+            self = .failed(failure)
+        } else {
+            self = .answered(try Answer(from: decoder))
+        }
+    }
+}
+
 /// 外部の調査プロセスを1つ起動し、問いを渡して答えを受け取る。
 ///
 /// 受け渡しの約束（調べる仕組みを差し替えるときもこれを守る）:
-/// - 標準入力：問い1件につき1行の JSON（`AnswerRequest`）。`{"at", "question", "quote", "context": [{"speaker", "start", "text"}]}`。
+/// - 標準入力：問い1件につき1行の JSON（`AnswerRequest`）。`{"meeting", "at", "question", "quote", "context": [{"speaker", "start", "text"}]}`。
 ///   終わるときに閉じられる。閉じられたら受け取った分を処理して終了する
-/// - 標準出力：答え1件につき1行の JSON（`Answer`）。`{"at", "question", "answer", "confidence", "sources": [{"path", "line"}]}`
+/// - 標準出力：問い1件につき1行の JSON。`meeting`・`at`・`question` は問いのものをそのまま返す
+///   - 答え（`Answer`）：`{"meeting", "at", "question", "answer", "confidence", "sources": [{"path", "line"}]}`
+///   - 調べられなかったとき（`AnswerFailure`）：`{"meeting", "at", "question", "error"}`
 /// - 標準エラー：そのまま端末に出す。ログや進捗用
 /// - コマンドは /bin/sh -c で実行する
 public final class CandidateAnswerer: @unchecked Sendable {
-    private let process: JSONLinesProcess<Answer>
+    private let process: JSONLinesProcess<AnswerResult>
 
     /// - Parameters:
     ///   - command: /bin/sh -c で実行するコマンド
     ///   - onAnswer: 1件受け取るたびに呼ばれる。読み取り用のスレッドから呼ばれる
-    public init(command: String, onAnswer: @escaping @Sendable (Answer) -> Void) {
+    public init(command: String, onAnswer: @escaping @Sendable (AnswerResult) -> Void) {
         process = JSONLinesProcess(name: "調査プロセス", command: command, onOutput: onAnswer)
     }
 

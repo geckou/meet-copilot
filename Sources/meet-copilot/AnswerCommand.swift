@@ -63,8 +63,12 @@ private struct Meeting {
             stamp: stamp,
             candidatesURL: dir.appendingPathComponent(name),
             transcriptURL: dir.appendingPathComponent("transcript-\(stamp).jsonl"),
-            answersURL: dir.appendingPathComponent("answers-\(stamp).jsonl")
+            answersURL: answersURL(in: dir, stamp: stamp)
         )
+    }
+
+    static func answersURL(in dir: URL, stamp: String) -> URL {
+        dir.appendingPathComponent("answers-\(stamp).jsonl")
     }
 }
 
@@ -82,6 +86,7 @@ private final class AnswerSession: @unchecked Sendable {
     private var candidates: [Candidate] = []
     private var answered: Set<String> = []
     private var inProgress: Set<String> = []
+    private var failed: Set<String> = []
     private var answersFailed = false
 
     init(outputDir: URL) {
@@ -106,6 +111,7 @@ private final class AnswerSession: @unchecked Sendable {
                 meeting = latest
                 answered = Set(JSONLinesFile.read(Answer.self, from: latest.answersURL).map { Self.key($0.at, $0.question) })
                 inProgress = []
+                failed = []
             }
             candidates = JSONLinesFile.read(Candidate.self, from: latest.candidatesURL)
         }
@@ -121,13 +127,15 @@ private final class AnswerSession: @unchecked Sendable {
             if candidates.isEmpty { print("  まだない") }
             for (index, candidate) in candidates.enumerated() {
                 let key = Self.key(candidate.at, candidate.question)
-                let mark = answered.contains(key) ? " ✓" : inProgress.contains(key) ? " …調査中" : ""
+                let mark = answered.contains(key) ? " ✓"
+                    : inProgress.contains(key) ? " …調査中"
+                    : failed.contains(key) ? " ✗ 失敗" : ""
                 print(String(format: "%3d. ", index + 1) + "[\(formatTime(candidate.at))] \(candidate.question)\(mark)")
             }
         }
     }
 
-    /// 番号の候補を調査プロセスに渡す形にする。範囲外なら nil
+    /// 番号の候補を調査プロセスに渡す形にする。番号は最後に表示した一覧のもの。範囲外なら nil
     func request(number: Int) -> AnswerRequest? {
         lock.withLock {
             guard let meeting, candidates.indices.contains(number - 1) else { return nil }
@@ -136,26 +144,68 @@ private final class AnswerSession: @unchecked Sendable {
             let context = JSONLinesFile.read(TranscriptRow.self, from: meeting.transcriptURL)
                 .filter { range.contains($0.start) }
                 .map { AnswerRequest.Utterance(speaker: $0.speaker, start: $0.start, text: $0.text) }
-            inProgress.insert(Self.key(candidate.at, candidate.question))
-            return AnswerRequest(candidate: candidate, context: context)
+            let key = Self.key(candidate.at, candidate.question)
+            inProgress.insert(key)
+            failed.remove(key)
+            return AnswerRequest(meeting: meeting.stamp, candidate: candidate, context: context)
         }
     }
 
-    func receive(_ answer: Answer) {
+    func receive(_ result: AnswerResult) {
         lock.withLock {
-            let key = Self.key(answer.at, answer.question)
-            inProgress.remove(key)
-            answered.insert(key)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            if let line = try? encoder.encode(answer) { answers?.append(line) }
+            switch result {
+            case .answered(let answer):
+                let key = Self.key(answer.at, answer.question)
+                // 調べている間に録音が切り替わっていたら、問いを出した録音のファイルに書く
+                let current = answer.meeting == nil || answer.meeting == meeting?.stamp
+                if current {
+                    inProgress.remove(key)
+                    answered.insert(key)
+                }
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                if let line = try? encoder.encode(answer) {
+                    if current {
+                        answers?.append(line)
+                    } else if let stamp = answer.meeting {
+                        appendAnswer(line, toMeeting: stamp)
+                    }
+                }
 
-            let sources = answer.sources.map { source in source.line.map { "\(source.path):\($0)" } ?? source.path }
-            print("\n=== 回答 [\(formatTime(answer.at))] \(answer.question)（確度: \(answer.confidence)）")
-            print(answer.answer)
-            if !sources.isEmpty { print("根拠: " + sources.joined(separator: ", ")) }
+                let sources = answer.sources.map { source in source.line.map { "\(source.path):\($0)" } ?? source.path }
+                print("\n=== 回答 [\(formatTime(answer.at))] \(answer.question)（確度: \(answer.confidence)）"
+                    + (current ? "" : "（録音 \(answer.meeting ?? "")）"))
+                print(answer.answer)
+                if !sources.isEmpty { print("根拠: " + sources.joined(separator: ", ")) }
+            case .failed(let failure):
+                let key = Self.key(failure.at, failure.question)
+                let current = failure.meeting == nil || failure.meeting == meeting?.stamp
+                if current {
+                    inProgress.remove(key)
+                    failed.insert(key)
+                }
+                print("\n=== 調査失敗 [\(formatTime(failure.at))] \(failure.question)"
+                    + (current ? "" : "（録音 \(failure.meeting ?? "")）"))
+                print(failure.error)
+            }
             print("> ", terminator: "")
             fflush(stdout)
+        }
+    }
+
+    /// いま開いていない録音の answers ファイルに1件書き足す
+    private func appendAnswer(_ line: Data, toMeeting stamp: String) {
+        do {
+            let file = try JSONLinesFile(url: Meeting.answersURL(in: outputDir, stamp: stamp), name: "answers", appending: true)
+            file.append(line)
+            let summary = file.close()
+            if summary.failed {
+                fputs(summary.description + "\n", stderr)
+                answersFailed = true
+            }
+        } catch {
+            fputs("answers のファイルを開けない: \(error)\n", stderr)
+            answersFailed = true
         }
     }
 
@@ -190,31 +240,48 @@ func answer(_ options: AnswerOptions) -> Never {
     if !options.repos.isEmpty {
         print("調べる対象: " + options.repos.joined(separator: ", "))
     }
-    session.refresh()
-    session.printList()
-    while true {
-        print("番号で調べる / Enter で一覧を更新 / q で終了 > ", terminator: "")
-        fflush(stdout)
-        guard let line = readLine()?.trimmingCharacters(in: .whitespaces), line != "q" else { break }
-        session.refresh()
-        if line.isEmpty {
-            session.printList()
-            continue
+
+    // q・入力の終わり・Ctrl-C のどれでも、受け取った問いを調べ終えてから閉じる
+    let finishing = NSLock()
+    nonisolated(unsafe) var finished = false
+    @Sendable func finish() {
+        guard finishing.withLock({ defer { finished = true }; return !finished }) else { return }
+        print("\n調査の残りを処理中...")
+        Task.detached {
+            let succeeded = report(await answerer.finish(), of: "調査プロセス")
+            let closed = session.close()
+            exit(succeeded && closed ? 0 : 1)
         }
-        guard let number = Int(line), let request = session.request(number: number) else {
-            print("一覧の番号を入れる: \(line)")
-            continue
-        }
-        print("調査中: \(request.question)")
-        answerer.ask(request)
     }
 
-    // 受け取った問いを調べ終えてから閉じる
-    print("\n調査の残りを処理中...")
-    Task.detached {
-        let succeeded = report(await answerer.finish(), of: "調査プロセス")
-        let closed = session.close()
-        exit(succeeded && closed ? 0 : 1)
+    signal(SIGINT, SIG_IGN)
+    let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    sigint.setEventHandler { finish() }
+    sigint.resume()
+
+    // 入力待ちで止まるので別スレッドで読む。メインは Ctrl-C を受けるために空けておく
+    Thread.detachNewThread {
+        session.refresh()
+        session.printList()
+        while true {
+            print("番号で調べる / Enter で一覧を更新 / q で終了 > ", terminator: "")
+            fflush(stdout)
+            guard let line = readLine()?.trimmingCharacters(in: .whitespaces), line != "q" else { break }
+            // 一覧の更新と録音の切り替えは Enter のときだけ。番号は表示済みの一覧で解決する
+            if line.isEmpty {
+                session.refresh()
+                session.printList()
+                continue
+            }
+            guard let number = Int(line), let request = session.request(number: number) else {
+                print("一覧の番号を入れる: \(line)")
+                continue
+            }
+            print("調査中: \(request.question)")
+            answerer.ask(request)
+        }
+        DispatchQueue.main.async { finish() }
     }
-    dispatchMain()
+
+    withExtendedLifetime(sigint) { dispatchMain() }
 }

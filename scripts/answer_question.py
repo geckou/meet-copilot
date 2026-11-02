@@ -3,9 +3,11 @@
 meet-copilot answer から1つ起動される。
 
 受け渡しの約束は Sources/Candidates/CandidateAnswerer.swift を参照:
-- 標準入力: 問い1件につき1行の JSON。{"at": 秒, "question": "...", "quote": "...", "context": [{"speaker", "start", "text"}, ...]}
+- 標準入力: 問い1件につき1行の JSON。{"meeting": "...", "at": 秒, "question": "...", "quote": "...", "context": [{"speaker", "start", "text"}, ...]}
   閉じられたら、受け取った分を処理して終了する
-- 標準出力: 答え1件につき1行の JSON。{"at", "question", "answer", "confidence", "sources": [{"path", "line"}]}
+- 標準出力: 問い1件につき1行の JSON。meeting / at / question は問いのものをそのまま返す
+  答え: {"meeting", "at", "question", "answer", "confidence", "sources": [{"path", "line"}]}
+  調べられなかったとき: {"meeting", "at", "question", "error"}
 
 問いは届いた順に1件ずつ処理する。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡し、
 1つ目の --repo を作業ディレクトリ、残りを --add-dir にする。標準ライブラリだけで動く。
@@ -79,6 +81,11 @@ def build_prompt(request):
     )
 
 
+def echo(request):
+    """問いから答えにそのまま返す分。呼び出し元はこれで問いと答えを対応付ける"""
+    return {"meeting": request.get("meeting"), "at": request["at"], "question": request["question"]}
+
+
 def answer(args, request):
     output = run_claude(
         args.claude_bin, build_prompt(request),
@@ -93,8 +100,7 @@ def answer(args, request):
             and isinstance(sources, list) and all(isinstance(s, dict) and isinstance(s.get("path"), str) for s in sources)):
         raise ClaudeError(f"claude -p の答えが想定の形でない: {output}")
     return {
-        "at": request["at"],
-        "question": request["question"],
+        **echo(request),
         "answer": output["answer"],
         "confidence": output["confidence"],
         "sources": [{"path": s["path"], **({"line": s["line"]} if isinstance(s.get("line"), int) else {})} for s in sources],
@@ -130,6 +136,7 @@ def main():
             result = answer(args, request)
         except (ClaudeError, OSError, subprocess.TimeoutExpired) as error:
             log(f"「{request['question']}」の調査失敗: {error}")
+            print(json.dumps({**echo(request), "error": str(error)}, ensure_ascii=False), flush=True)
             failures += 1
             continue
         log(f"「{request['question']}」の調査完了（{time.monotonic() - started:.1f} 秒）")

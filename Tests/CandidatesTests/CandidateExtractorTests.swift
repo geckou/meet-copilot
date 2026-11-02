@@ -30,23 +30,35 @@ final class CandidateExtractorTests: XCTestCase {
     func testAnswererSendsRequestAndReadsAnswer() async {
         let script = """
         exec python3 -c 'import sys, json; r = json.loads(sys.stdin.readline()); \\
-        print(json.dumps({"at": r["at"], "question": r["question"], "answer": str(len(r["context"])), \\
+        print(json.dumps({"meeting": r["meeting"], "at": r["at"], "question": r["question"], "answer": str(len(r["context"])), \\
         "confidence": "high", "sources": [{"path": "a.swift", "line": 3}]}))'
         """
         let answers = AnswerBox()
-        let answerer = CandidateAnswerer(command: script) { answers.set($0) }
+        let answerer = CandidateAnswerer(command: script) { if case .answered(let a) = $0 { answers.set(a) } }
         XCTAssertNoThrow(try answerer.start())
         let candidate = Candidate(at: 7, question: "期限は？", quote: "期限どれくらい？")
-        answerer.ask(AnswerRequest(candidate: candidate, context: [
+        answerer.ask(AnswerRequest(meeting: "20261030-100000", candidate: candidate, context: [
             .init(speaker: "相手", start: 7, text: "期限どれくらい？"),
             .init(speaker: "自分", start: 9, text: "確認します"),
         ]))
         let exit = await answerer.finish()
 
         XCTAssertTrue(exit.succeeded)
+        XCTAssertEqual(answers.value?.meeting, "20261030-100000")
         XCTAssertEqual(answers.value?.question, "期限は？")
         XCTAssertEqual(answers.value?.answer, "2")
         XCTAssertEqual(answers.value?.sources.first?.line, 3)
+    }
+
+    /// error のある行は失敗として読まれ、問いと録音が対応付く
+    func testAnswerResultDecodesFailure() throws {
+        let line = Data(#"{"meeting":"m1","at":7,"question":"期限は？","error":"timeout"}"#.utf8)
+        guard case .failed(let failure) = try JSONDecoder().decode(AnswerResult.self, from: line) else {
+            return XCTFail("失敗として読まれない")
+        }
+        XCTAssertEqual(failure.meeting, "m1")
+        XCTAssertEqual(failure.question, "期限は？")
+        XCTAssertEqual(failure.error, "timeout")
     }
 
     private final class AnswerBox: @unchecked Sendable {
