@@ -12,17 +12,15 @@ meet-copilot record --candidates から1つ起動される。
 """
 
 import argparse
-import glob
 import json
-import math
-import os
-import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+
+from claude_cli import ClaudeError, add_claude_arguments, find_claude, format_time, positive, run_claude
 
 OTHER = "相手"
 
@@ -71,59 +69,12 @@ def log(message):
     print(f"[candidates] {message}", file=sys.stderr, flush=True)
 
 
-def positive(value):
-    number = float(value)
-    if not (math.isfinite(number) and number > 0):
-        raise argparse.ArgumentTypeError("正の有限の数")
-    return number
-
-
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--claude-bin", default=os.environ.get("MEET_COPILOT_CLAUDE"),
-                   help="claude の実行ファイル。省略時は PATH とよくある置き場所から探す（環境変数 MEET_COPILOT_CLAUDE でも指定可）")
-    p.add_argument("--model", default="sonnet")
+    add_claude_arguments(p, model="sonnet", timeout=120.0)
     p.add_argument("--settle", type=positive, default=2.0, help="相手の最後の発言からこの秒数だけ新しい発言がなければ抽出する")
     p.add_argument("--window", type=positive, default=180.0, help="最新の発言からこの秒数分さかのぼったやり取りを渡す")
-    p.add_argument("--timeout", type=positive, default=120.0, help="claude -p 1回の上限秒数")
     return p.parse_args()
-
-
-def find_claude(explicit):
-    """claude の実行ファイルを探す。nvm で入れた場合は PATH に無いことがあるので、よくある置き場所も見る。"""
-    # claude は一時ディレクトリを作業ディレクトリにして動かすので、相対パスはここで絶対パスにしておく
-    if explicit:
-        found = os.path.abspath(explicit) if os.sep in explicit else shutil.which(explicit)
-        if not found or not os.access(found, os.X_OK):
-            log(f"claude として指定された実行ファイルがない: {explicit}")
-            sys.exit(1)
-        return found
-    if found := shutil.which("claude"):
-        return os.path.abspath(found)
-    home = os.path.expanduser("~")
-    candidates = [
-        os.path.join(home, ".claude", "local", "claude"),
-        os.path.join(home, ".local", "bin", "claude"),
-        "/opt/homebrew/bin/claude",
-        "/usr/local/bin/claude",
-    ]
-
-    def node_version(path):
-        version = path.split(os.sep)[-3].lstrip("v")
-        return tuple(int(part) if part.isdigit() else 0 for part in version.split("."))
-
-    # 新しい node のものを優先する
-    candidates += sorted(glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin", "claude")), key=node_version, reverse=True)
-    for path in candidates:
-        if os.access(path, os.X_OK):
-            return path
-    log("claude が見つからない。--claude-bin か環境変数 MEET_COPILOT_CLAUDE で場所を指定する")
-    sys.exit(1)
-
-
-def format_time(seconds):
-    minutes = int(seconds // 60)
-    return f"{minutes:02d}:{seconds - minutes * 60:04.1f}"
 
 
 def build_prompt(utterances, previous, window):
@@ -138,39 +89,22 @@ def build_prompt(utterances, previous, window):
     )
 
 
-def run_claude(args, prompt, workdir):
-    command = [
-        args.claude_bin, "-p",
-        "--model", args.model,
-        "--tools", "",
-        "--no-session-persistence",
-        "--output-format", "json",
-        "--json-schema", json.dumps(SCHEMA),
-        "--system-prompt", SYSTEM_PROMPT,
-    ]
-    result = subprocess.run(
-        command,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=args.timeout,
+def extract(args, prompt, workdir):
+    output = run_claude(
+        args.claude_bin, prompt,
+        model=args.model, schema=SCHEMA, timeout=args.timeout,
+        system_prompt=SYSTEM_PROMPT,
         # このリポジトリの CLAUDE.md などを読み込ませないよう、空のディレクトリで動かす
         cwd=workdir,
-        # 端末の Ctrl-C は録音側が受ける。抽出中の claude まで止まらないよう別グループにする
-        start_new_session=True,
-        # nvm で入れた claude は同じ場所の node で動くので、その場所を PATH の先頭に足す
-        env={**os.environ, "PATH": os.path.dirname(args.claude_bin) + os.pathsep + os.environ.get("PATH", "")},
     )
-    try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        raise RuntimeError(f"claude -p の出力を読めない（終了コード {result.returncode}）: {result.stderr.strip() or result.stdout.strip()}")
-    if result.returncode != 0 or response.get("is_error"):
-        raise RuntimeError(f"claude -p が失敗: {response.get('result')}")
-    output = response.get("structured_output")
-    if not isinstance(output, dict) or not isinstance(output.get("candidates"), list):
-        raise RuntimeError(f"claude -p の結果が想定の形でない: {response.get('result')}")
-    return output["candidates"]
+    candidates = output.get("candidates")
+    if not isinstance(candidates, list) or not all(
+        isinstance(c, dict) and isinstance(c.get("at"), (int, float))
+        and isinstance(c.get("question"), str) and isinstance(c.get("quote"), str)
+        for c in candidates
+    ):
+        raise ClaudeError(f"claude -p の候補が想定の形でない: {output}")
+    return candidates
 
 
 class Conversation:
@@ -226,7 +160,11 @@ class Conversation:
 def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = parse_args()
-    args.claude_bin = find_claude(args.claude_bin)
+    try:
+        args.claude_bin = find_claude(args.claude_bin)
+    except ClaudeError as error:
+        log(str(error))
+        sys.exit(1)
     conversation = Conversation()
     threading.Thread(target=conversation.read, args=(sys.stdin,), daemon=True).start()
 
@@ -236,8 +174,8 @@ def main():
         while (utterances := conversation.wait_for_batch(args.settle)) is not None:
             started = time.monotonic()
             try:
-                candidates = run_claude(args, build_prompt(utterances, previous, args.window), workdir)
-            except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+                candidates = extract(args, build_prompt(utterances, previous, args.window), workdir)
+            except (ClaudeError, OSError, subprocess.TimeoutExpired) as error:
                 log(f"抽出失敗: {error}")
                 failures += 1
                 continue

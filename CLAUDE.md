@@ -37,7 +37,13 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 
 - `Sources/Candidates/`：候補抽出プロセスとの受け渡し（`CandidateExtractor`）
 - `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。標準ライブラリのみ
-- 候補を押したらリポジトリを読みに行く部分（README の 5）は未着手
+- `scripts/claude_cli.py`：scripts/ から claude -p を呼ぶ共通部分（claude の場所の解決、呼び出し、MCP を読まない、結果の取り出し）。claude -p を使うスクリプトはこれを使う
+
+候補を選んだら調べる部分（README の 5）を追加（2026-10-27）。`answer --repo <path>` を録音とは別のターミナルで動かし、選んだ候補だけ外部プロセス（`scripts/answer_question.py`）に渡す。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡す。
+
+- `Sources/Candidates/CandidateAnswerer.swift`：調査プロセスとの受け渡し
+- `Sources/meet-copilot/AnswerCommand.swift`：候補の一覧と番号での選択。答えは answers-<日時>.jsonl
+- `Sources/meet-copilot/JSONLinesFile.swift`：transcript / candidates / answers の JSON Lines ファイルの書き足しと読み込みの共通部分
 
 実機で分かったこと（2026-10-20）：
 - Meet の相手側音声は発言の合間がほぼ無音（-88 dBFS）で、音量による区切りが効く。話し終わりから約1秒で結果が出る
