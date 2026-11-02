@@ -156,7 +156,8 @@ private final class AnswerSession: @unchecked Sendable {
     /// 番号の候補を調査プロセスに渡す形にする。番号は最後に表示した一覧のもの
     func select(number: Int) -> Selection {
         lock.withLock {
-            guard let meeting, candidates.indices.contains(number - 1) else { return .outOfRange }
+            // 引く前に範囲を見る。Int.min から 1 を引くと落ちる
+            guard let meeting, number >= 1, number <= candidates.count else { return .outOfRange }
             let candidate = candidates[number - 1]
             let key = Self.key(candidate.at, candidate.question)
             if inProgress.contains(key) { return .inProgress(candidate.question) }
