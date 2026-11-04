@@ -123,7 +123,7 @@ swift run meet-copilot answer --repo ~/path/to/repo --out ./recordings
 
 - `--out` の中でいちばん新しい `candidates-<日時>.jsonl` の候補を番号付きで並べる。Enter で一覧を更新（新しい録音が始まっていれば切り替え）、番号で調べる（番号は表示中の一覧のもの）、`q` か Ctrl-C で終了。終了時は調べている途中の問いを待つ
 - 選んだ候補だけ、前後 2 分半のやり取りを添えて `claude -p` に渡す。ツールは Read / Grep / Glob のみ（読み取りだけ）で、1つ目の `--repo` を作業ディレクトリ、残りを `--add-dir` にする
-- 答えは会議でそのまま言える 2〜4 文と、根拠のファイル・行、確度（high / medium / low）。端末に出し、`answers-<日時>.jsonl` に書き足す。調べ終えた候補には ✓、調べられなかった候補には ✗ が付く。調べている間に録音が切り替わっても、答えは問いを出した録音の answers に入る
+- 答えは会議でそのまま言える 2〜3 文（120 字程度）と、根拠のファイル・行、確度（high / medium / low）。端末に出し、`answers-<日時>.jsonl` に書き足す。調べ終えた候補には ✓、調べられなかった候補には ✗ が付く。調べている間に録音が切り替わっても、答えは問いを出した録音の answers に入る
 - 調べる仕組みは `--answerer <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateAnswerer.swift` の冒頭を参照
 
 ## 最初のタスク
