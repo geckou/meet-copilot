@@ -162,6 +162,11 @@ final class Termination: @unchecked Sendable {
                 for (track, transcriber) in transcribers {
                     let exit = await transcriber.finish()
                     if !report(exit, of: "[\(track.rawValue)] 文字起こしプロセス") { transcriberFailed = true }
+                    // Swift 側の変換で流せなかった音声があれば、文字起こしは欠けている
+                    if transcriber.conversionFailed {
+                        fputs("[\(track.rawValue)] 文字起こし用の変換に失敗した音声がある\n", stderr)
+                        transcriberFailed = true
+                    }
                 }
             }
             // 文字起こしが出し切られてから入力を閉じ、候補抽出プロセスは残りを処理してから終わる
