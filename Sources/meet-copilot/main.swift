@@ -1,6 +1,6 @@
 // meet-copilot の本体。当面はターミナルから swift run で起動する。
 //
-// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe] [--candidates]
+// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe] [--candidates] [--keep-audio]
 //      swift run meet-copilot answer --repo <path> [--repo <path>...] [--out <dir>]
 
 import Candidates
@@ -12,7 +12,7 @@ import Transcription
 let usage = """
 usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
                            [--transcribe | --transcriber <command>]
-                           [--candidates | --extractor <command>]
+                           [--candidates | --extractor <command>] [--keep-audio]
        meet-copilot answer --repo <path> [--repo <path>...] [--out <dir>] [--answerer <command>]
 
 record  アプリ音声（相手）とマイク（自分）を別々の WAV に書き出す
@@ -25,6 +25,7 @@ record  アプリ音声（相手）とマイク（自分）を別々の WAV に�
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
                  candidates-<日時>.jsonl に書く。--transcribe か --transcriber が要る
   --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
+  --keep-audio   文字起こしが終わっても WAV を消さない。文字起こしするときは、成功したら WAV を消すのが既定
 
 answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリを claude -p（scripts/answer_question.py）で調べて答える。
         record とは別のターミナルで動かす。答えは answers-<日時>.jsonl に書き足す
@@ -51,6 +52,7 @@ struct RecordOptions {
     var duration: Double?
     var transcriber: String?
     var extractor: String?
+    var keepAudio = false
 }
 
 func fail(_ message: String) -> Never {
@@ -84,6 +86,8 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
         case "--extractor":
             guard let v = args.next(), !v.isEmpty else { fail("--extractor に値がない") }
             options.extractor = v
+        case "--keep-audio":
+            options.keepAudio = true
         case "-h", "--help":
             print(usage)
             exit(0)
@@ -114,8 +118,10 @@ func report(_ exit: ProcessExit, of name: String) -> Bool {
 /// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
 /// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗、
 /// 文字起こし・候補抽出プロセスの異常終了も反映する。
+/// 文字起こしが最後まで成功したら、keepAudio でない限り WAV を消す。残すのは文字起こしと候補だけ。
 final class Termination: @unchecked Sendable {
     private let recorder: TwoTrackRecorder
+    private let keepAudio: Bool
     private let transcribers: [(Track, TranscriberProcess)]
     private let transcript: Transcript?
     private let extractor: CandidateExtractor?
@@ -129,9 +135,11 @@ final class Termination: @unchecked Sendable {
         transcribers: [(Track, TranscriberProcess)],
         transcript: Transcript?,
         extractor: CandidateExtractor?,
-        candidateLog: CandidateLog?
+        candidateLog: CandidateLog?,
+        keepAudio: Bool
     ) {
         self.recorder = recorder
+        self.keepAudio = keepAudio
         self.transcribers = transcribers
         self.transcript = transcript
         self.extractor = extractor
@@ -181,8 +189,25 @@ final class Termination: @unchecked Sendable {
                 print(summary.description)
                 candidateLogFailed = summary.failed
             }
+            var deleteFailed = false
+            let audio = [result.app.url, result.mic.url].filter { FileManager.default.fileExists(atPath: $0.path) }
+            if transcript != nil, !keepAudio, !audio.isEmpty {
+                if transcriberFailed || transcriptFailed || result.startError != nil {
+                    print("文字起こしが欠けている可能性があるので、音声は残す")
+                } else {
+                    for url in audio {
+                        do {
+                            try FileManager.default.removeItem(at: url)
+                        } catch {
+                            fputs("音声を消せない: \(url.path): \(error)\n", stderr)
+                            deleteFailed = true
+                        }
+                    }
+                    if !deleteFailed { print("文字起こしが終わったので音声を消した（残すときは --keep-audio）") }
+                }
+            }
             let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
-                || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed
+                || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || deleteFailed
             exit(lock.withLock { max(exitCode, failed ? 1 : 0) })
         }
     }
@@ -257,7 +282,8 @@ func record(_ options: RecordOptions) -> Never {
         transcribers: transcribers,
         transcript: transcript,
         extractor: extractor,
-        candidateLog: candidateLog
+        candidateLog: candidateLog,
+        keepAudio: options.keepAudio
     )
     @Sendable func finish(exitCode: Int32) {
         termination.finish(exitCode: exitCode)

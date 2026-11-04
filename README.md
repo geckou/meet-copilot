@@ -97,6 +97,7 @@ swift run meet-copilot record --transcribe --out ./recordings
 ```
 
 - 発話ごとに `[01:23.4] 相手: ...` の形で端末に流れ、`transcript-<日時>.jsonl` に書き足される。時刻は録音開始からの秒数で、2トラックで揃っている
+- 録音を止めて文字起こしが最後まで終わったら、WAV（`app-` / `mic-<日時>.wav`）を消す。文字起こしのプロセスや transcript ファイルへの書き込みに失敗があれば残す。残したいときは `--keep-audio`
 - トラックごとに `scripts/transcribe_whisper.py` が1つずつ起動し、それぞれが whisper-server を空きポートで立てる。音量で発話を区切り、区切りごとに whisper に送るので、話し終わりから結果まで1秒前後遅れる
 - 文字起こしの仕組みは `--transcriber <command>` で差し替えられる。受け渡しの約束（標準入力に 16kHz・モノラル・16bit の生 PCM、標準出力に1行1件の JSON）は `Sources/Transcription/TranscriberProcess.swift` の冒頭を参照
 
