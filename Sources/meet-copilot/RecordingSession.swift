@@ -13,7 +13,7 @@ struct SessionError: Error, CustomStringConvertible {
 /// record コマンドと UI の両方から使う。
 ///
 /// stop() は何度呼んでも後片付けは1回で、結果も同じものを返す。
-/// 文字起こしが最後まで成功したら、keepAudio でない限り WAV を消す。残すのは文字起こしと候補だけ。
+/// 文字起こしするときは、keepAudio でない限り WAV を消す。失敗があっても消す。残すのは文字起こしと候補だけ。
 final class RecordingSession: @unchecked Sendable {
     /// 出力ファイル名の <日時>
     let stamp: String
@@ -154,6 +154,11 @@ final class RecordingSession: @unchecked Sendable {
             for (track, transcriber) in transcribers {
                 let exit = await transcriber.finish()
                 if !report(exit, of: "[\(track.rawValue)] 文字起こしプロセス") { transcriberFailed = true }
+                // Swift 側の変換で流せなかった音声があれば、文字起こしは欠けている
+                if transcriber.conversionFailed {
+                    fputs("[\(track.rawValue)] 文字起こし用の変換に失敗した音声がある\n", stderr)
+                    transcriberFailed = true
+                }
             }
         }
         // 文字起こしが出し切られてから入力を閉じ、候補抽出プロセスは残りを処理してから終わる
@@ -196,21 +201,22 @@ final class RecordingSession: @unchecked Sendable {
             }
         }
         var deleteFailed = false
-        let audio = [result.app.url, result.mic.url].filter { FileManager.default.fileExists(atPath: $0.path) }
-        if transcript != nil, !keepAudio, !audio.isEmpty {
-            if transcriberFailed || transcriptFailed || result.startError != nil {
-                print("文字起こしが欠けている可能性があるので、音声は残す")
-            } else {
-                for url in audio {
-                    do {
-                        try FileManager.default.removeItem(at: url)
-                    } catch {
-                        fputs("音声を消せない: \(url.path): \(error)\n", stderr)
-                        deleteFailed = true
-                    }
+        // 文字起こしに失敗があっても消す。残すのは --keep-audio を付けたときだけ。
+        // 存在を確かめてから消すと、確かめられないだけのファイルを見逃すので、両方消しに行き、無かったときだけ無視する
+        if transcript != nil, !keepAudio {
+            var deleted = 0
+            for url in [result.app.url, result.mic.url] {
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    deleted += 1
+                } catch CocoaError.fileNoSuchFile {
+                    continue
+                } catch {
+                    fputs("音声を消せない: \(url.path): \(error)\n", stderr)
+                    deleteFailed = true
                 }
-                if !deleteFailed { print("文字起こしが終わったので音声を消した（残すときは --keep-audio）") }
             }
+            if deleted > 0, !deleteFailed { print("音声を消した（残すときは --keep-audio）") }
         }
         let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
             || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || minutesFailed || deleteFailed

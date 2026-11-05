@@ -26,6 +26,8 @@ public final class TranscriberProcess: @unchecked Sendable {
     )!
     // append() を呼ぶ音声スレッドからのみ触る。finish() は append() が止まってから呼ばれる
     private var converter: AVAudioConverter?
+    /// 変換に1回でも失敗し、流せなかった音声がある。finish() の後に読む
+    public private(set) var conversionFailed = false
 
     /// - Parameters:
     ///   - command: /bin/sh -c で実行するコマンド
@@ -70,12 +72,19 @@ public final class TranscriberProcess: @unchecked Sendable {
             // 2ch→1ch で片方を捨てずに混ぜる
             converter?.downmix = true
         }
-        guard let converter else { return nil }
+        guard let converter else {
+            conversionFailed = true
+            fputs("文字起こし用の変換器を作れない: \(buffer.format)\n", stderr)
+            return head.isEmpty ? nil : head
+        }
 
         // 容量が変換後ぴったりだと入力を一部しか消費せず、残りが失われる（実測）。余裕を持たせる
         let ratio = outputFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio * 2).rounded(.up)) + 1024
-        guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else { return nil }
+        guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
+            conversionFailed = true
+            return head.isEmpty ? nil : head
+        }
 
         // サンプルレート変換は前後のバッファをまたいで状態を持つので、終端扱いにせず .noDataNow で返す
         var supplied = false
@@ -90,6 +99,7 @@ public final class TranscriberProcess: @unchecked Sendable {
             return buffer
         }
         guard status != .error, let samples = output.int16ChannelData else {
+            conversionFailed = true
             fputs("文字起こし用の変換失敗: \(error.map { "\($0)" } ?? "unknown")\n", stderr)
             return head.isEmpty ? nil : head
         }
@@ -100,13 +110,17 @@ public final class TranscriberProcess: @unchecked Sendable {
     private func drain(_ converter: AVAudioConverter) -> Data? {
         var result = Data()
         while true {
-            guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4096) else { return nil }
+            guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4096) else {
+                conversionFailed = true
+                return result
+            }
             var error: NSError?
             let status = converter.convert(to: output, error: &error) { _, inputStatus in
                 inputStatus.pointee = .endOfStream
                 return nil
             }
             guard status != .error, let samples = output.int16ChannelData else {
+                conversionFailed = true
                 fputs("文字起こし用の変換失敗: \(error.map { "\($0)" } ?? "unknown")\n", stderr)
                 return result
             }

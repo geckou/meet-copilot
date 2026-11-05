@@ -28,7 +28,7 @@ record  アプリ音声（相手）とマイク（自分）を別々の WAV に�
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
                  candidates-<日時>.jsonl に書く。--transcribe か --transcriber が要る
   --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
-  --keep-audio   文字起こしが終わっても WAV を消さない。文字起こしするときは、成功したら WAV を消すのが既定
+  --keep-audio   WAV を消さない。文字起こしするときは、停止時に WAV を消すのが既定（文字起こしに失敗があっても消す）
 
 answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリ（--repo が無ければ Web）を
         claude -p（scripts/answer_question.py）で調べて答える。
