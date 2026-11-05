@@ -143,6 +143,8 @@ final class CopilotModel: ObservableObject {
 
     private func add(_ candidate: Candidate) {
         guard let session else { return }
+        // 答えは（録音, 時刻, 問い）で候補に戻す。同じものが2行あると、片方が調べ中のまま残るので1行にする
+        guard index(meeting: session.stamp, at: candidate.at, question: candidate.question) == nil else { return }
         items.append(Item(meeting: session.stamp, candidate: candidate))
     }
 
