@@ -25,7 +25,7 @@ record  アプリ音声（相手）とマイク（自分）を別々の WAV に�
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
                  candidates-<日時>.jsonl に書く。--transcribe か --transcriber が要る
   --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
-  --keep-audio   文字起こしが終わっても WAV を消さない。文字起こしするときは、成功したら WAV を消すのが既定
+  --keep-audio   WAV を消さない。文字起こしするときは、停止時に WAV を消すのが既定（文字起こしに失敗があっても消す）
 
 answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリを claude -p（scripts/answer_question.py）で調べて答える。
         record とは別のターミナルで動かす。答えは answers-<日時>.jsonl に書き足す
@@ -118,7 +118,7 @@ func report(_ exit: ProcessExit, of name: String) -> Bool {
 /// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
 /// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗、
 /// 文字起こし・候補抽出プロセスの異常終了も反映する。
-/// 文字起こしが最後まで成功したら、keepAudio でない限り WAV を消す。残すのは文字起こしと候補だけ。
+/// 文字起こしするときは、keepAudio でない限り WAV を消す。失敗があっても消す。残すのは文字起こしと候補だけ。
 final class Termination: @unchecked Sendable {
     private let recorder: TwoTrackRecorder
     private let keepAudio: Bool
@@ -196,20 +196,17 @@ final class Termination: @unchecked Sendable {
             }
             var deleteFailed = false
             let audio = [result.app.url, result.mic.url].filter { FileManager.default.fileExists(atPath: $0.path) }
+            // 文字起こしに失敗があっても消す。残すのは --keep-audio を付けたときだけ
             if transcript != nil, !keepAudio, !audio.isEmpty {
-                if transcriberFailed || transcriptFailed || result.startError != nil {
-                    print("文字起こしが欠けている可能性があるので、音声は残す")
-                } else {
-                    for url in audio {
-                        do {
-                            try FileManager.default.removeItem(at: url)
-                        } catch {
-                            fputs("音声を消せない: \(url.path): \(error)\n", stderr)
-                            deleteFailed = true
-                        }
+                for url in audio {
+                    do {
+                        try FileManager.default.removeItem(at: url)
+                    } catch {
+                        fputs("音声を消せない: \(url.path): \(error)\n", stderr)
+                        deleteFailed = true
                     }
-                    if !deleteFailed { print("文字起こしが終わったので音声を消した（残すときは --keep-audio）") }
                 }
+                if !deleteFailed { print("音声を消した（残すときは --keep-audio）") }
             }
             let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
                 || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || deleteFailed

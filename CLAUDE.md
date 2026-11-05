@@ -28,7 +28,7 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 
 文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。
 
-文字起こしが最後まで成功したら WAV を消す（README の 6、2026-11-04）。消すのは `Termination`（`Sources/meet-copilot/main.swift`）の終了処理の最後で、文字起こしに失敗があれば残す。`--keep-audio` で常に残す。文字起こしなしの録音では消さない。
+文字起こしするときは停止時に WAV を消す（README の 6、2026-11-04）。消すのは `Termination`（`Sources/meet-copilot/main.swift`）の終了処理の最後。文字起こしに失敗があっても消す（2026-11-05、明示的に残すとき以外は要らない）。失敗は終了コード 1 で伝える。`--keep-audio` で常に残す。文字起こしなしの録音では消さない。
 
 - `Sources/ExternalProcess/`：外部プロセスとの受け渡しの共通部分（`JSONLinesProcess`）。起動、標準入力への書き込み、1行1件の JSON の読み取り、終了待ち、失敗の集計。外部に処理を任せる部分を足すときはこれを使う
 - `Sources/Transcription/`：文字起こしプロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
