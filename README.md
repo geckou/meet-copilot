@@ -2,7 +2,9 @@
 
 Google Meet の会議中、自分が把握していない実装について相手から質問されたときに、ローカルのリポジトリを読んで答えを用意してくれる macOS アプリ。
 
-発端は議事録アプリだったが、本質は「会議に一緒に参加して、隣で調べてくれる存在」。議事録生成は副産物として後から足す。
+発端は議事録アプリだったが、本質は「会議に一緒に参加して、隣で調べてくれる存在」。議事録は文字起こしの副産物として停止時に書く。
+
+自分用の試作。配布・公証・話者分離モデルは対象外。
 
 ## 解決したいこと
 
@@ -14,10 +16,10 @@ Google Meet の会議中、自分が把握していない実装について相�
 
 1. 手動で録音開始（自動検知は後回し）
 2. マイク（自分）とアプリ音声（相手）を **別トラック** で録る
-3. それぞれ streaming で文字起こし、話者ラベル付きでログに流す
-4. 直近のやり取りを塊で LLM に投げ、相手が答えを求めている箇所を **候補として並べる**
-5. 候補を押したときだけ、ローカルのリポジトリを読みに行って答えを出す
-6. 議事録・文字起こしの生成が終わったら音声ファイルを削除する
+3. それぞれ発話ごとに文字起こしし、話者ラベル付きでログに流す
+4. 相手の発言が落ち着いたら直近のやり取りを LLM に渡し、調べれば答えられる問いを **候補として並べる**
+5. 候補を押したときだけ、ローカルのリポジトリ（未選択なら Web）を調べて答えを出す
+6. 録音を止めたら議事録を書く。音声はファイルに残さない
 
 ## 設計上の判断
 
@@ -45,42 +47,60 @@ Google Meet の会議中、自分が把握していない実装について相�
 
 | 要素 | 手段 |
 | --- | --- |
-| 音声キャプチャ | ScreenCaptureKit（macOS 13+）でアプリ音声、別途マイク |
-| 文字起こし | streaming 前提のモデル（whisper.cpp をそのまま使うなら streaming 対応が必要） |
-| 候補抽出 | LLM |
-| コード参照 | ローカルに clone 済みのリポジトリが前提 |
-| UI | ログと候補一覧。メニューバー常駐 |
+| 音声キャプチャ | ScreenCaptureKit（macOS 13+）でアプリ音声、AVAudioEngine でマイク（ボイス処理あり） |
+| 文字起こし | whisper.cpp（ローカル、large-v3-turbo）。音量で発話を区切って whisper-server に送る。whisper-server は2トラックで1つを共有 |
+| 候補抽出 | `claude -p`（sonnet、ツールなし） |
+| 調査 | `claude -p`（sonnet）。リポジトリは Read / Grep / Glob のみ、Web は WebSearch / WebFetch のみ |
+| UI | SwiftUI の `MenuBarExtra`。CLI（`record` / `answer`）もある |
 
-Swift で新規に書くのは音声の2トラック取得と画面まわりのみ。文字起こしとコード参照は外部に投げる。
+Swift で新規に書くのは音声の2トラック取得と画面まわりのみ。文字起こし・候補抽出・調査は外部プロセス（`scripts/`）に任せ、JSON Lines で受け渡す。
 
-なお本リポジトリは Swift の macOS アプリであり、project-starter（React/Expo/Next 系）の構成・規約は適用しない。
+| 場所 | 内容 |
+| --- | --- |
+| `Sources/Capture/` | 2トラック録音と WAV 書き出し |
+| `Sources/ExternalProcess/` | 外部プロセスとの受け渡しの共通部分 |
+| `Sources/Transcription/` | 文字起こしプロセスとの受け渡し。16kHz・モノラル・16bit への変換 |
+| `Sources/Candidates/` | 候補抽出・調査プロセスとの受け渡し |
+| `Sources/meet-copilot/` | 実行ターゲット。CLI のサブコマンド、録音のつなぎ（`RecordingSession`）、UI |
+| `scripts/` | 外部プロセスの本体（Python、標準ライブラリのみ） |
+| `spikes/two-track-capture/` | 2トラック取得の検証（経緯は同ディレクトリの README） |
 
 ## 前提・制約
 
 - 画面収録権限が必須（音声だけでも要求される）。削除の有無とは無関係
-- 対象リポジトリはローカルに持っていることが前提
-- 音声ファイルは議事録・文字起こしの生成が終わった時点で削除する。残すのは文字起こしと議事録のみ
-- ただし会話は常時 LLM に流れるため、「データが残らない」とは言えない
+- 権限は起動したターミナルに付く。.app にはまとめていない
+- リポジトリを調べるときは、対象をローカルに持っていることが前提
+- Claude Code にログイン済みであることが前提。利用枠は Claude Code のものを使う
+- 音声は whisper.cpp でローカルに処理し、このマシンの外には出さない。文字起こしのうち直近のやり取りは常時 `claude -p` に渡るため、「データが残らない」とは言えない
+- 文字起こしするときは、WAV を書かない（`--keep-audio` を除く）。残るのは文字起こし・候補・答えの JSON Lines と議事録
+- `claude -p` にはユーザー全体の設定（`~/.claude/CLAUDE.md` など）を読ませない。リポジトリを調べるときは、そのリポジトリの CLAUDE.md は読む
 - Meet 側に「録音中」の表示は出ない。相手への説明は運用で担保する必要がある
+
+## 未検証
+
+- ヘッドホンなしで Meet に出たときの回り込みの対策。マイクのボイス処理で Chrome の音を除けるかは実機で未確認。効かなければ、相手と重なった「自分」の行を除く案に切り替える
+- 長めの文（質問）での文字起こし精度
 
 ## 未確定
 
 - 会議開始の自動検知を入れるか（Workspace Events API で conference.started の購読は可能だが、Pub/Sub 経由でサーバーに飛ぶ設計。ローカルで音の発生を見る方法もある）
-- 文字起こしをローカルで回すかクラウドに投げるか
 - 会話中の割り込み表示を入れるかどうか
-- 議事録生成を足すかどうか
 
 ## 実行
 
-macOS 13 以降、Xcode が必要。
+macOS 13 以降、Xcode が必要。テストは `swift test`。
+
+初回はマイクと画面収録の許可が要る。許可する対象は実行元のターミナルで、画面収録の許可後はターミナルの再起動が要る。
+
+### 準備
+
+whisper.cpp とモデル（large-v3-turbo、約1.6GB）を入れる。Claude Code にログインしておく。
 
 ```sh
-swift run meet-copilot record --duration 30 --out ./recordings
+brew install whisper-cpp
+mkdir -p models
+curl -fL -o models/ggml-large-v3-turbo.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 ```
-
-- オプションは `spikes/two-track-capture` と同じ（`--app` / `--out` / `--duration`）
-- 権限はターミナル側に付く。初回はマイクと画面収録の許可が要り、画面収録の許可後はターミナルの再起動が要る
-- テストは `swift test`
 
 ### メニューバーから使う
 
@@ -92,29 +112,32 @@ swift run meet-copilot ui --out ./recordings
 - 調べるリポジトリは画面の「選ぶ...」で指定する（次回も覚えている）。未選択か「外す」を押した状態なら Web で調べる
 - 停止すると、読む用の議事録 `minutes-<日時>.md` を書く。出た問いの一覧と、時刻順の発言（同じ話者が続く分は1段落）
 - 議事録の保存先は画面下の「変更...」で選ぶ（次回も覚えている。録音していないときだけ）。選んでいなければ `--out`
-- `transcript` / `candidates` / `answers` の JSON Lines と WAV は機械用で、議事録とは分けて `--out` に置く
-- 権限は起動したターミナルに付く。下の whisper.cpp と Claude Code の準備が要る
+- `transcript` / `candidates` / `answers` の JSON Lines は機械用で、議事録とは分けて `--out` に置く。WAV は書かない（UI には残す設定がない）
+- 上の準備が要る
 - ヘッドホンなしでも相手の声が「自分」に入りにくいよう、マイクに macOS のボイス処理（エコー除去）をかける。CLI の `record` で切るときは `--no-voice-processing`
 - 終了は画面の「終了」かターミナルの Ctrl-C。録音中なら止めてから終わる。調べている途中の問いは待たない
 
-### 文字起こし（whisper.cpp）
-
-初回のみ whisper.cpp とモデル（large-v3-turbo、約1.6GB）を入れる。
+### 録音だけ（record）
 
 ```sh
-brew install whisper-cpp
-mkdir -p models
-curl -fL -o models/ggml-large-v3-turbo.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+swift run meet-copilot record --duration 30 --out ./recordings
 ```
+
+- アプリ音声（`app-<日時>.wav`）とマイク（`mic-<日時>.wav`）を別ファイルに書く
+- `--app` は対象アプリの bundle id 前方一致（既定 `com.google.Chrome`、空文字で全アプリ）、`--out` は出力先、`--duration` は録音秒数（省略時は Ctrl-C まで）
+
+### 文字起こし（whisper.cpp）
 
 ```sh
 swift run meet-copilot record --transcribe --out ./recordings
 ```
 
 - 発話ごとに `[01:23.4] 相手: ...` の形で端末に流れ、`transcript-<日時>.jsonl` に書き足される。時刻は録音開始からの秒数で、2トラックで揃っている
-- 録音を止めて文字起こしの残りを処理したら、WAV（`app-` / `mic-<日時>.wav`）を消す。文字起こしに失敗があっても消す。残したいときは `--keep-audio`
-- トラックごとに `scripts/transcribe_whisper.py` が1つずつ起動し、それぞれが whisper-server を空きポートで立てる。音量で発話を区切り、区切りごとに whisper に送るので、話し終わりから結果まで1秒前後遅れる
-- 文字起こしの仕組みは `--transcriber <command>` で差し替えられる。受け渡しの約束（標準入力に 16kHz・モノラル・16bit の生 PCM、標準出力に1行1件の JSON）は `Sources/Transcription/TranscriberProcess.swift` の冒頭を参照
+- 録音を止めて文字起こしの残りを処理したら、議事録 `minutes-<日時>.md` を書く。失敗があれば終了コード 1 で伝える
+- 音声はファイルに書かず、文字起こしにだけ流す。WAV も残すときは `--keep-audio`
+- トラックごとに `scripts/transcribe_whisper.py` が1つずつ起動し、音量で発話を区切って whisper に送る。話し終わりから結果まで1秒前後遅れる
+- whisper-server は管理役のプロセス（`transcribe_whisper.py --serve`）が空きポートで1つだけ立て、両トラックで共有する。whisper は1件ずつ処理するので、両トラックの発話が重なると片方は待つ
+- 受け渡しの約束（標準入力に 16kHz・モノラル・16bit の生 PCM、標準出力に1行1件の JSON）は `Sources/Transcription/TranscriberProcess.swift` の冒頭を参照
 
 ### 候補の抽出（claude -p）
 
@@ -122,12 +145,11 @@ swift run meet-copilot record --transcribe --out ./recordings
 swift run meet-copilot record --transcribe --candidates --out ./recordings
 ```
 
-- 相手の発言が来て 2 秒新しい発言がなければ、直近 3 分のやり取りを `claude -p`（ツールなし）に渡し、相手が答えを求めている箇所を抜き出す
+- 相手の発言（9 文字以上）が来て 2 秒新しい発言がなければ、直近 3 分のやり取りを `claude -p`（ツールなし）に渡し、相手の問いのうち調べれば答えられるものを抜き出す。判断や意見を求める問い、本人にしか分からない問いは出さない。相槌のような短い発言だけでは呼ばず、次に呼ぶときのやり取りに含める
 - 候補は `[候補 01:23] 問い` と根拠の発言の形で端末に流れ、`candidates-<日時>.jsonl` に書き足される
-- 抽出は1回ずつ順に行い、実行中に来た発言は次の回にまとめる。既に出した候補は渡して重複を避ける
-- Claude Code にログイン済みであることが前提。利用枠は Claude Code のものを使う
+- 抽出は1回ずつ順に行い、実行中に来た発言は次の回にまとめる。既に出した候補は渡して重複を避け、同じ発言からの候補は1つだけ通す
 - スクリプト単体の確認：`python3 scripts/extract_candidates.py < scripts/testdata/conversation.jsonl`
-- 抽出の仕組みは `--extractor <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateExtractor.swift` の冒頭を参照
+- 受け渡しの約束は `Sources/Candidates/CandidateExtractor.swift` の冒頭を参照
 
 ### 候補を調べる（claude -p）
 
@@ -138,11 +160,7 @@ swift run meet-copilot answer --repo ~/path/to/repo --out ./recordings
 ```
 
 - `--out` の中でいちばん新しい `candidates-<日時>.jsonl` の候補を番号付きで並べる。Enter で一覧を更新（新しい録音が始まっていれば切り替え）、番号で調べる（番号は表示中の一覧のもの）、`q` か Ctrl-C で終了。終了時は調べている途中の問いを待つ
-- 選んだ候補だけ、前後 2 分半のやり取りを添えて `claude -p` に渡す。ツールは Read / Grep / Glob のみ（読み取りだけ）で、1つ目の `--repo` を作業ディレクトリ、残りを `--add-dir` にする
+- 選んだ候補だけ、前後のやり取り（根拠の発言の 120 秒前〜30 秒後）を添えて `claude -p` に渡す。ツールは Read / Grep / Glob のみ（読み取りだけ）で、1つ目の `--repo` を作業ディレクトリ、残りを `--add-dir` にする
 - `--repo` を省くと Web で調べる。ツールは WebSearch / WebFetch のみで、空の一時ディレクトリで動かす。根拠には URL が入る。検索語として問いの内容が検索に渡る
 - 答えは会議でそのまま言える 2〜3 文（120 字程度）と、根拠のファイル・行、確度（high / medium / low）。端末に出し、`answers-<日時>.jsonl` に書き足す。調べ終えた候補には ✓、調べられなかった候補には ✗ が付く。調べている間に録音が切り替わっても、答えは問いを出した録音の answers に入る
-- 調べる仕組みは `--answerer <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateAnswerer.swift` の冒頭を参照
-
-## 最初のタスク
-
-ScreenCaptureKit の2トラック取得の検証。Swift の実行ファイル1本で、アプリ音声とマイクを別ファイルに書き出すところまで。ここが通れば残りは繋ぎ込み。
+- 受け渡しの約束は `Sources/Candidates/CandidateAnswerer.swift` の冒頭を参照

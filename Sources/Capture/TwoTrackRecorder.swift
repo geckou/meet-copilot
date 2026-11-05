@@ -31,7 +31,7 @@ public struct CapturedApp: Sendable {
 }
 
 /// ScreenCaptureKit で指定アプリの音声（相手）を、AVAudioEngine でマイク（自分）を取り、
-/// 別々の WAV ファイルに書き出す。両方が動き出してから書き始め、停止処理の前に書き込みを止めて
+/// URL があれば別々の WAV ファイルに書き出す。両方が動き出してから書き始め、停止処理の前に書き込みを止めて
 /// 2トラックの秒数を揃える。
 ///
 /// 1インスタンスにつき start() / stop() を1回ずつ使う。
@@ -55,12 +55,13 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     private var stream: SCStream?
     private var tapInstalled = false
     private var startTask: Task<[CapturedApp], Error>?
-    private var stopTask: Task<RecordingResult, Never>?
+    private var stopped = false
 
     /// - Parameters:
     ///   - bundlePrefix: 対象アプリの bundle id 前方一致。空文字で全アプリ
+    ///   - appURL, micURL: WAV の書き出し先。nil なら書かず、onBuffer にだけ渡す
     ///   - voiceProcessing: マイクに macOS のボイス処理（エコー除去）をかける。スピーカーの音がマイクに回り込むのを抑える
-    public init(bundlePrefix: String, appURL: URL, micURL: URL, voiceProcessing: Bool = true) {
+    public init(bundlePrefix: String, appURL: URL?, micURL: URL?, voiceProcessing: Bool = true) {
         self.bundlePrefix = bundlePrefix
         self.voiceProcessing = voiceProcessing
         self.appWriter = TrackWriter(name: "app", url: appURL)
@@ -70,7 +71,7 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     /// 権限を確認して録音を始める。返り値は音声を取る対象のアプリ。
     public func start() async throws -> [CapturedApp] {
         let task = try lock.withLock {
-            guard startTask == nil, stopTask == nil else { throw CaptureError("start() は1回だけ呼べる") }
+            guard startTask == nil, !stopped else { throw CaptureError("start() は1回だけ呼べる") }
             let task = Task { try await self.performStart() }
             startTask = task
             return task
@@ -78,20 +79,33 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
         return try await task.value
     }
 
-    /// 止めてファイルを閉じる。起動途中なら起動が終わるのを待ってから止める。
-    /// 2回目以降の呼び出しは1回目と同じ結果を返す。
-    @discardableResult
+    /// 止めてファイルを閉じる。起動途中なら起動が終わるのを待ってから止める。1回だけ呼ぶ。
     public func stop() async -> RecordingResult {
-        let task = lock.withLock {
-            if let stopTask { return stopTask }
+        lock.withLock {
+            stopped = true
             // 停止処理にかかる時間の分だけ片方が長くなるのを防ぐため、先に両方の書き込みを止める
             appWriter.disarm()
             micWriter.disarm()
-            let task = Task { await self.performStop() }
-            stopTask = task
-            return task
         }
-        return await task.value
+
+        // 起動途中で止めると後始末の対象が揃わないので、起動の成否が出るまで待つ
+        var startError: String?
+        do {
+            _ = try await lock.withLock({ startTask })?.value
+        } catch {
+            startError = "\(error)"
+        }
+
+        let (stream, tapInstalled) = lock.withLock { (self.stream, self.tapInstalled) }
+        if let stream {
+            do { try await stream.stopCapture() } catch { fputs("stopCapture 失敗: \(error)\n", stderr) }
+        }
+        // 起動途中のエラーで止める場合、タップが無いまま removeTap すると例外になる
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+        }
+        engine.stop()
+        return RecordingResult(app: appWriter.close(), mic: micWriter.close(), startError: startError)
     }
 
     private func performStart() async throws -> [CapturedApp] {
@@ -170,27 +184,6 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
         return apps.map {
             CapturedApp(bundleIdentifier: $0.bundleIdentifier, processID: $0.processID, name: $0.applicationName)
         }
-    }
-
-    private func performStop() async -> RecordingResult {
-        // 起動途中で止めると後始末の対象が揃わないので、起動の成否が出るまで待つ
-        var startError: String?
-        do {
-            _ = try await lock.withLock({ startTask })?.value
-        } catch {
-            startError = "\(error)"
-        }
-
-        let (stream, tapInstalled) = lock.withLock { (self.stream, self.tapInstalled) }
-        if let stream {
-            do { try await stream.stopCapture() } catch { fputs("stopCapture 失敗: \(error)\n", stderr) }
-        }
-        // 起動途中のエラーで止める場合、タップが無いまま removeTap すると例外になる
-        if tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-        }
-        engine.stop()
-        return RecordingResult(app: appWriter.close(), mic: micWriter.close(), startError: startError)
     }
 
     // MARK: SCStreamOutput

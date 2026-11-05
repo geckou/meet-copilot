@@ -4,39 +4,31 @@
 //      swift run meet-copilot answer [--repo <path>...] [--out <dir>]
 //      swift run meet-copilot ui [--out <dir>]
 
-import Candidates
-import Capture
 import ExternalProcess
 import Foundation
-import Transcription
 
 let usage = """
 usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
-                           [--transcribe | --transcriber <command>]
-                           [--candidates | --extractor <command>] [--keep-audio] [--no-voice-processing]
-       meet-copilot answer [--repo <path>...] [--out <dir>] [--answerer <command>]
+                           [--transcribe] [--candidates] [--keep-audio] [--no-voice-processing]
+       meet-copilot answer [--repo <path>...] [--out <dir>]
        meet-copilot ui [--out <dir>]
 
-record  アプリ音声（相手）とマイク（自分）を別々の WAV に書き出す
+record  アプリ音声（相手）とマイク（自分）を別々に録る。文字起こししないときは WAV に書き出す
   --app          対象アプリの bundle id 前方一致（既定: com.google.Chrome、空文字で全アプリ）
   --out          出力ディレクトリ（既定: カレントディレクトリ）
   --duration     録音秒数。省略時は Ctrl-C まで
   --transcribe   whisper.cpp（scripts/transcribe_whisper.py）で文字起こしし、transcript-<日時>.jsonl に書く。
                  停止時に読む用の議事録 minutes-<日時>.md も書く
-  --transcriber  文字起こしに使うコマンド（/bin/sh -c で実行）。トラックごとに1つ起動し、
-                 環境変数 MEET_COPILOT_TRACK に app / mic を渡す
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
-                 candidates-<日時>.jsonl に書く。--transcribe か --transcriber が要る
-  --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
+                 candidates-<日時>.jsonl に書く。--transcribe が要る
   --no-voice-processing  マイクのボイス処理（エコー除去）を切る。既定はスピーカーの音の回り込みを抑えるために有効
-  --keep-audio   WAV を消さない。文字起こしするときは、停止時に WAV を消すのが既定（文字起こしに失敗があっても消す）
+  --keep-audio   文字起こしするときも WAV に書き出す。既定では文字起こしするときは WAV を書かない
 
 answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリ（--repo が無ければ Web）を
         claude -p（scripts/answer_question.py）で調べて答える。
         record とは別のターミナルで動かす。答えは answers-<日時>.jsonl に書き足す
   --repo         調べるリポジトリ。複数指定できる。1つ目を claude の作業ディレクトリにする。省略時は Web で調べる
   --out          record の出力ディレクトリ（既定: カレントディレクトリ）。いちばん新しい candidates-<日時>.jsonl を使う
-  --answerer     調べるのに使うコマンド（/bin/sh -c で実行）。指定したときは --repo を渡さない
 
 ui      メニューバーに常駐し、録音・文字起こし・候補・調査を1画面で扱う。record --transcribe --candidates と answer をまとめたもの
   --out          録音・文字起こし・候補・答えのファイルの置き場所（既定: カレントディレクトリ）。
@@ -59,8 +51,9 @@ struct RecordOptions {
     var bundlePrefix = "com.google.Chrome"
     var outputDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     var duration: Double?
-    var transcriber: String?
-    var extractor: String?
+    var transcribe = false
+    var candidates = false
+    /// 文字起こしするときも WAV に書き出す。文字起こししないときは常に書き出す
     var keepAudio = false
     var voiceProcessing = true
     /// 議事録（minutes-<日時>.md）の置き場所。nil なら outputDir
@@ -89,15 +82,9 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
                   d * 1_000_000_000 < Double(UInt64.max) else { fail("--duration は正の数") }
             options.duration = d
         case "--transcribe":
-            options.transcriber = scriptCommand("transcribe_whisper.py")
-        case "--transcriber":
-            guard let v = args.next(), !v.isEmpty else { fail("--transcriber に値がない") }
-            options.transcriber = v
+            options.transcribe = true
         case "--candidates":
-            options.extractor = scriptCommand("extract_candidates.py")
-        case "--extractor":
-            guard let v = args.next(), !v.isEmpty else { fail("--extractor に値がない") }
-            options.extractor = v
+            options.candidates = true
         case "--no-voice-processing":
             options.voiceProcessing = false
         case "--keep-audio":
@@ -109,8 +96,8 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
             fail("不明な引数: \(arg)\n\(usage)")
         }
     }
-    if options.extractor != nil, options.transcriber == nil {
-        fail("--candidates / --extractor には --transcribe か --transcriber が要る")
+    if options.candidates, !options.transcribe {
+        fail("--candidates には --transcribe が要る")
     }
     return options
 }

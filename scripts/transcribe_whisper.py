@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""whisper.cpp で文字起こしする外部プロセス。meet-copilot record --transcribe から1トラックにつき1つ起動される。
+"""whisper.cpp で文字起こしする外部プロセス。meet-copilot record --transcribe から、録音1回につき
+whisper-server の管理役（--serve）が1つと、文字起こし役がトラックごとに1つ起動される。
 
 受け渡しの約束は Sources/Transcription/TranscriberProcess.swift を参照:
 - 標準入力: 16kHz・モノラル・16bit 符号付き・リトルエンディアンの生 PCM。閉じられたら残りを処理して終了する
 - 標準出力: 1行1件の JSON。{"start": 秒, "end": 秒, "text": "..."}
 
 whisper.cpp には標準入力を受けて逐次処理する仕組みがないので、ここで音量から発話の区切りを見つけ、
-区切りごとに whisper-server へ送る。whisper-server はこのプロセスが空きポートで起動し、終了時に止める。
+区切りごとに whisper-server へ送る。モデルを二重に読まないよう、whisper-server は管理役が空きポートで1つだけ起動し、
+準備ができたら URL を --url-file に書く。起動に失敗したら空のファイルを書く。管理役は標準入力が閉じられたら止める。
 標準ライブラリだけで動く。
 """
 
@@ -43,6 +45,8 @@ def log(message):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--url-file", required=True, help="whisper-server の URL を受け渡すファイル")
+    p.add_argument("--serve", action="store_true", help="文字起こしせず、whisper-server の管理役として動く")
     p.add_argument("--model", default=os.path.join(REPO_ROOT, "models", "ggml-large-v3-turbo.bin"))
     p.add_argument("--language", default="ja")
     p.add_argument("--server-bin", default="whisper-server")
@@ -74,9 +78,9 @@ def free_port():
 
 
 def start_server(args):
+    """whisper-server を起動し、応答するまで待つ。失敗は RuntimeError か OSError。"""
     if not os.path.exists(args.model):
-        log(f"モデルがない: {args.model}（README の手順で落とす）")
-        sys.exit(1)
+        raise RuntimeError(f"モデルがない: {args.model}（README の手順で落とす）")
     port = free_port()
     server = subprocess.Popen(
         [args.server_bin, "-m", args.model, "-l", args.language, "--host", "127.0.0.1", "--port", str(port)],
@@ -90,8 +94,7 @@ def start_server(args):
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if server.poll() is not None:
-            log(f"whisper-server が起動直後に終了した（終了コード {server.returncode}）")
-            sys.exit(1)
+            raise RuntimeError(f"whisper-server が起動直後に終了した（終了コード {server.returncode}）")
         try:
             HTTP.open(url, timeout=1).close()
             log(f"whisper-server 起動: {url}")
@@ -99,8 +102,57 @@ def start_server(args):
         except (urllib.error.URLError, ConnectionError, TimeoutError):
             time.sleep(0.2)
     server.terminate()
-    log("whisper-server が 60 秒以内に応答しない")
+    server.wait()
+    raise RuntimeError("whisper-server が 60 秒以内に応答しない")
+
+
+def publish_url(path, url):
+    """途中まで書いた内容を読まれないよう、書き終えてから置く。"""
+    temporary = f"{path}.tmp"
+    with open(temporary, "w") as f:
+        f.write(url)
+    os.replace(temporary, path)
+
+
+def wait_for_url(path):
+    """管理役が書いた URL を読む。読めなければログを出して終了する。"""
+    # 管理役は 60 秒で諦めて空のファイルを書くので、それより長く待つ
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        try:
+            with open(path) as f:
+                url = f.read()
+        except FileNotFoundError:
+            time.sleep(0.2)
+            continue
+        if not url:
+            log("whisper-server を起動できなかった")
+            sys.exit(1)
+        return url
+    log("whisper-server の起動を待ちきれなかった")
     sys.exit(1)
+
+
+def serve(args):
+    """whisper-server を起動して URL を知らせ、標準入力が閉じられたら止める。"""
+    server = None
+    try:
+        server, url = start_server(args)
+    except (RuntimeError, OSError) as error:
+        log(str(error))
+        url = ""
+    publish_url(args.url_file, url)
+    sys.stdin.buffer.read()
+    # 文字起こし役が読み終えているので、ここで消してよい
+    os.unlink(args.url_file)
+    if server is None:
+        sys.exit(1)
+    crashed = server.poll() is not None
+    server.terminate()
+    server.wait()
+    if crashed:
+        log(f"whisper-server が途中で終了した（終了コード {server.returncode}）")
+        sys.exit(1)
 
 
 def transcribe(url, pcm):
@@ -135,10 +187,6 @@ def transcribe(url, pcm):
 
 def rms_db(frame):
     samples = array.array("h", frame)
-    if sys.byteorder != "little":
-        samples.byteswap()
-    if not samples:
-        return -math.inf
     mean_square = sum(s * s for s in samples) / len(samples)
     return 10 * math.log10(mean_square / (32768.0 ** 2)) if mean_square > 0 else -math.inf
 
@@ -225,29 +273,29 @@ def main():
     # 端末の Ctrl-C は録音側が受ける。こちらは標準入力が閉じられるまで残りを処理し続ける
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = parse_args()
-    server, url = start_server(args)
+    if args.serve:
+        serve(args)
+        return
+    url = wait_for_url(args.url_file)
+    log(f"whisper-server: {url}")
     failures = 0
-    try:
-        segments = queue.Queue()
-        # 文字起こし中も標準入力を読み続けないと、パイプが詰まって録音側に溜まる
-        threading.Thread(target=segment_stdin, args=(args, segments), daemon=True).start()
-        while (item := segments.get()) is not None:
-            start, pcm = item
-            if pcm is None:  # 区切りの処理が失敗した
-                failures += 1
-                continue
-            end = start + len(pcm) / 2 / SAMPLE_RATE
-            try:
-                text = transcribe(url, pcm)
-            except Exception as error:  # noqa: BLE001 1区切りの失敗で全体を止めない
-                log(f"{start:.1f}s 〜 {end:.1f}s の文字起こし失敗: {error}")
-                failures += 1
-                continue
-            if text:
-                print(json.dumps({"start": round(start, 2), "end": round(end, 2), "text": text}, ensure_ascii=False), flush=True)
-    finally:
-        server.terminate()
-        server.wait()
+    segments = queue.Queue()
+    # 文字起こし中も標準入力を読み続けないと、パイプが詰まって録音側に溜まる
+    threading.Thread(target=segment_stdin, args=(args, segments), daemon=True).start()
+    while (item := segments.get()) is not None:
+        start, pcm = item
+        if pcm is None:  # 区切りの処理が失敗した
+            failures += 1
+            continue
+        end = start + len(pcm) / 2 / SAMPLE_RATE
+        try:
+            text = transcribe(url, pcm)
+        except Exception as error:  # noqa: BLE001 1区切りの失敗で全体を止めない
+            log(f"{start:.1f}s 〜 {end:.1f}s の文字起こし失敗: {error}")
+            failures += 1
+            continue
+        if text:
+            print(json.dumps({"start": round(start, 2), "end": round(end, 2), "text": text}, ensure_ascii=False), flush=True)
     # 残りの区切りは処理し続けたうえで、取りこぼしがあったことを終了コードで録音側に伝える
     if failures:
         log(f"文字起こしに失敗した区切り: {failures} 件")

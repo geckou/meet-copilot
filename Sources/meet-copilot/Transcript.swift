@@ -6,6 +6,15 @@ import Transcription
 /// 2トラック分の文字起こし結果に話者ラベルを付け、端末に流しつつ JSON Lines のファイルに書き足す。
 /// 時刻は録音開始（2トラックの書き込み開始）からの秒数で、2トラックで揃っている。
 final class Transcript: @unchecked Sendable {
+    /// transcript-<日時>.jsonl の1行
+    private struct Record: Encodable {
+        let track: String
+        let speaker: String
+        let start: Double
+        let end: Double
+        let text: String
+    }
+
     private let file: JSONLinesFile
     private let queue = DispatchQueue(label: "transcript")
     /// 議事録を書くために手元にも残す（話者, 開始秒, 本文）
@@ -30,16 +39,8 @@ final class Transcript: @unchecked Sendable {
             print("[\(formatTime(utterance.start))] \(speaker): \(utterance.text)")
             lines.append((speaker, utterance.start, utterance.text))
 
-            let record: [String: Any] = [
-                "track": track.rawValue,
-                "speaker": speaker,
-                "start": utterance.start,
-                "end": utterance.end,
-                "text": utterance.text,
-            ]
-            guard let line = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes]) else {
-                return
-            }
+            let record = Record(track: track.rawValue, speaker: speaker, start: utterance.start, end: utterance.end, text: utterance.text)
+            guard let line = try? JSONLinesFile.encode(record) else { return }
             onRecord?(line)
             file.append(line)
         }

@@ -74,7 +74,7 @@ public enum AnswerResult: Sendable, Decodable {
 
 /// 外部の調査プロセスを1つ起動し、問いを渡して答えを受け取る。
 ///
-/// 受け渡しの約束（調べる仕組みを差し替えるときもこれを守る）:
+/// 受け渡しの約束:
 /// - 標準入力：問い1件につき1行の JSON（`AnswerRequest`）。`{"meeting", "at", "question", "quote", "context": [{"speaker", "start", "text"}]}`。
 ///   終わるときに閉じられる。閉じられたら受け取った分を処理して終了する
 /// - 標準出力：問い1件につき1行の JSON。`meeting`・`at`・`question` は問いのものをそのまま返す

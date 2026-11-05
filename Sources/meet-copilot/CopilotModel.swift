@@ -49,7 +49,7 @@ final class CopilotModel: ObservableObject {
     private var session: RecordingSession?
     private var answerer: CandidateAnswerer?
     /// answerer が調べている対象。nil は Web
-    private var answererRepo: String??
+    private var answererRepo: String?
 
     private static let repoKey = "repoPath"
     private static let minutesDirKey = "minutesDir"
@@ -68,8 +68,8 @@ final class CopilotModel: ObservableObject {
         var options = RecordOptions()
         options.outputDir = outputDir
         options.minutesDir = minutesDir
-        options.transcriber = scriptCommand("transcribe_whisper.py")
-        options.extractor = scriptCommand("extract_candidates.py")
+        options.transcribe = true
+        options.candidates = true
 
         // 読み取り用スレッドから届いた順に、メインで反映する
         let session: RecordingSession
@@ -143,8 +143,6 @@ final class CopilotModel: ObservableObject {
 
     private func add(_ candidate: Candidate) {
         guard let session else { return }
-        // 答えは（録音, 時刻, 問い）で候補に戻す。同じものが2行あると、片方が調べ中のまま残るので1行にする
-        guard index(meeting: session.stamp, at: candidate.at, question: candidate.question) == nil else { return }
         items.append(Item(meeting: session.stamp, candidate: candidate))
     }
 
@@ -204,7 +202,6 @@ final class CopilotModel: ObservableObject {
     private func answererExited(_ exited: CandidateAnswerer) {
         if answerer === exited {
             answerer = nil
-            answererRepo = nil
         }
         for index in items.indices {
             if case .inProgress(let owner) = items[index].status, owner == ObjectIdentifier(exited) {

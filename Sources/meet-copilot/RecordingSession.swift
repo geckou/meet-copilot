@@ -13,16 +13,16 @@ struct SessionError: Error, CustomStringConvertible {
 /// record コマンドと UI の両方から使う。
 ///
 /// stop() は何度呼んでも後片付けは1回で、結果も同じものを返す。
-/// 文字起こしするときは、keepAudio でない限り WAV を消す。失敗があっても消す。残すのは文字起こしと候補だけ。
+/// 文字起こしするときは、keepAudio でない限り WAV を書かない。残すのは文字起こしと候補と議事録だけ。
 final class RecordingSession: @unchecked Sendable {
     /// 出力ファイル名の <日時>
     let stamp: String
-    let outputDir: URL
     private let minutesDir: URL
     private let startedAt = Date()
 
     private let recorder: TwoTrackRecorder
-    private let keepAudio: Bool
+    /// whisper-server の管理役。モデルを二重に読まないよう、2トラックで1つを共有する
+    private let whisperServer: JSONLinesProcess<Utterance>?
     private let transcribers: [(Track, TranscriberProcess)]
     private let transcript: Transcript?
     private let extractor: CandidateExtractor?
@@ -50,13 +50,12 @@ final class RecordingSession: @unchecked Sendable {
         let suffix = UUID().uuidString.prefix(6).lowercased()
         let stamp = "\(formatter.string(from: startedAt))-\(suffix)"
         self.stamp = stamp
-        self.outputDir = options.outputDir
         self.minutesDir = options.minutesDir ?? options.outputDir
-        self.keepAudio = options.keepAudio
+        let writesAudio = !options.transcribe || options.keepAudio
         let recorder = TwoTrackRecorder(
             bundlePrefix: options.bundlePrefix,
-            appURL: options.outputDir.appendingPathComponent("app-\(stamp).wav"),
-            micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav"),
+            appURL: writesAudio ? options.outputDir.appendingPathComponent("app-\(stamp).wav") : nil,
+            micURL: writesAudio ? options.outputDir.appendingPathComponent("mic-\(stamp).wav") : nil,
             voiceProcessing: options.voiceProcessing
         )
         self.recorder = recorder
@@ -70,9 +69,10 @@ final class RecordingSession: @unchecked Sendable {
             return SessionError(message)
         }
 
+        var whisperServer: JSONLinesProcess<Utterance>?
         var transcribers: [(Track, TranscriberProcess)] = []
         var transcript: Transcript?
-        if let command = options.transcriber {
+        if options.transcribe {
             let output: Transcript
             do {
                 output = try Transcript(url: options.outputDir.appendingPathComponent("transcript-\(stamp).jsonl"))
@@ -80,6 +80,20 @@ final class RecordingSession: @unchecked Sendable {
                 throw failure("文字起こしのファイルを作れない: \(error)")
             }
             rollbacks.append { _ = output.close() }
+            let urlFile = FileManager.default.temporaryDirectory.appendingPathComponent("meet-copilot-whisper-\(stamp).url")
+            let command = scriptCommand("transcribe_whisper.py") + " --url-file " + shellQuote(urlFile.path)
+            let server = JSONLinesProcess<Utterance>(
+                name: "whisper-server の管理プロセス",
+                command: command + " --serve",
+                environment: ["MEET_COPILOT_TRACK": "server"]
+            ) { _ in }
+            do {
+                try server.start()
+            } catch {
+                throw failure("whisper-server の管理プロセスを起動できない: \(error)")
+            }
+            rollbacks.append { _ = await server.finish() }
+            whisperServer = server
             for track in [Track.app, .mic] {
                 let transcriber = TranscriberProcess(
                     command: command,
@@ -100,12 +114,13 @@ final class RecordingSession: @unchecked Sendable {
             recorder.onBuffer = { track, buffer in byTrack[track]?.append(buffer) }
             transcript = output
         }
+        self.whisperServer = whisperServer
         self.transcribers = transcribers
         self.transcript = transcript
 
         var extractor: CandidateExtractor?
         var candidateLog: CandidateLog?
-        if let command = options.extractor, let transcript {
+        if options.candidates, let transcript {
             let log: CandidateLog
             do {
                 log = try CandidateLog(url: options.outputDir.appendingPathComponent("candidates-\(stamp).jsonl"))
@@ -113,7 +128,7 @@ final class RecordingSession: @unchecked Sendable {
                 throw failure("候補のファイルを作れない: \(error)")
             }
             rollbacks.append { _ = log.close() }
-            let process = CandidateExtractor(command: command) { candidate in
+            let process = CandidateExtractor(command: scriptCommand("extract_candidates.py")) { candidate in
                 log.append(candidate)
                 onCandidate(candidate)
             }
@@ -174,6 +189,10 @@ final class RecordingSession: @unchecked Sendable {
                 }
             }
         }
+        // 両トラックの文字起こしが終わってから止める
+        if let whisperServer, !report(await whisperServer.finish(), of: "whisper-server の管理プロセス") {
+            transcriberFailed = true
+        }
         // 文字起こしが出し切られてから入力を閉じ、候補抽出プロセスは残りを処理してから終わる
         var extractorFailed = false
         if let extractor {
@@ -199,7 +218,7 @@ final class RecordingSession: @unchecked Sendable {
             print(summary.description)
             candidateLogFailed = summary.failed
         }
-        // 読む用の議事録。中身は transcript / candidates と同じなので、書けなくても音声の扱いは変えない
+        // 読む用の議事録。中身は transcript / candidates と同じ
         var minutesFailed = false
         if let transcript {
             let url = minutesDir.appendingPathComponent("minutes-\(stamp).md")
@@ -213,26 +232,8 @@ final class RecordingSession: @unchecked Sendable {
                 minutesFailed = true
             }
         }
-        var deleteFailed = false
-        // 文字起こしに失敗があっても消す。残すのは --keep-audio を付けたときだけ。
-        // 存在を確かめてから消すと、確かめられないだけのファイルを見逃すので、両方消しに行き、無かったときだけ無視する
-        if transcript != nil, !keepAudio {
-            var deleted = 0
-            for url in [result.app.url, result.mic.url] {
-                do {
-                    try FileManager.default.removeItem(at: url)
-                    deleted += 1
-                } catch CocoaError.fileNoSuchFile {
-                    continue
-                } catch {
-                    fputs("音声を消せない: \(url.path): \(error)\n", stderr)
-                    deleteFailed = true
-                }
-            }
-            if deleted > 0, !deleteFailed { print("音声を消した（残すときは --keep-audio）") }
-        }
         let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
-            || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || minutesFailed || deleteFailed
+            || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || minutesFailed
         return !failed
     }
 }

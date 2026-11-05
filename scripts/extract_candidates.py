@@ -8,6 +8,7 @@ meet-copilot record --candidates から1つ起動される。
 - 標準出力: 候補1件につき1行の JSON。{"at": 秒, "question": "...", "quote": "..."}
 
 相手の発言が来てから少し待ち（続きの発言や自分の反応も含めるため）、直近のやり取りを claude -p に渡す。
+相槌のような短い発言だけでは呼ばない。短い発言も、次に呼ぶときのやり取りには含まれる。
 抽出は1回ずつ順に行い、実行中に来た発言は次の回にまとめる。標準ライブラリだけで動く。
 """
 
@@ -20,7 +21,7 @@ import tempfile
 import threading
 import time
 
-from claude_cli import ClaudeError, add_claude_arguments, find_claude, format_time, positive, run_claude
+from claude_cli import ClaudeError, add_claude_arguments, format_time, positive, require_claude, run_claude
 
 OTHER = "相手"
 
@@ -85,6 +86,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_claude_arguments(p, model="sonnet", timeout=120.0)
     p.add_argument("--settle", type=positive, default=2.0, help="相手の最後の発言からこの秒数だけ新しい発言がなければ抽出する")
+    p.add_argument("--min-chars", type=int, default=9, help="相手の発言がこの文字数より短ければ、それだけでは抽出しない")
     p.add_argument("--window", type=positive, default=180.0, help="最新の発言からこの秒数分さかのぼったやり取りを渡す")
     return p.parse_args()
 
@@ -122,11 +124,12 @@ def extract(args, prompt, workdir):
 class Conversation:
     """標準入力から届く発言を溜め、抽出すべき時点を知らせる。"""
 
-    def __init__(self):
+    def __init__(self, min_chars):
+        self.min_chars = min_chars
         self.cond = threading.Condition()
         self.utterances = []
         self.closed = False
-        self.unseen_other = False  # 前回の抽出以降に相手の発言が来ている
+        self.unseen_other = False  # 前回の抽出以降に、抽出するに足る長さの相手の発言が来ている
         self.last_arrival = 0.0
 
     def read(self, stream):
@@ -143,7 +146,7 @@ class Conversation:
             with self.cond:
                 self.utterances.append(utterance)
                 self.last_arrival = time.monotonic()
-                if utterance["speaker"] == OTHER:
+                if utterance["speaker"] == OTHER and len(utterance["text"].strip()) >= self.min_chars:
                     self.unseen_other = True
                 self.cond.notify_all()
         with self.cond:
@@ -172,12 +175,8 @@ class Conversation:
 def main():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = parse_args()
-    try:
-        args.claude_bin = find_claude(args.claude_bin)
-    except ClaudeError as error:
-        log(str(error))
-        sys.exit(1)
-    conversation = Conversation()
+    require_claude(args, log)
+    conversation = Conversation(args.min_chars)
     threading.Thread(target=conversation.read, args=(sys.stdin,), daemon=True).start()
 
     previous = []
