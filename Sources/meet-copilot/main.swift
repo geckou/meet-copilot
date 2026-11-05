@@ -195,18 +195,22 @@ final class Termination: @unchecked Sendable {
                 candidateLogFailed = summary.failed
             }
             var deleteFailed = false
-            let audio = [result.app.url, result.mic.url].filter { FileManager.default.fileExists(atPath: $0.path) }
-            // 文字起こしに失敗があっても消す。残すのは --keep-audio を付けたときだけ
-            if transcript != nil, !keepAudio, !audio.isEmpty {
-                for url in audio {
+            // 文字起こしに失敗があっても消す。残すのは --keep-audio を付けたときだけ。
+            // 存在を確かめてから消すと、確かめられないだけのファイルを見逃すので、両方消しに行き、無かったときだけ無視する
+            if transcript != nil, !keepAudio {
+                var deleted = 0
+                for url in [result.app.url, result.mic.url] {
                     do {
                         try FileManager.default.removeItem(at: url)
+                        deleted += 1
+                    } catch CocoaError.fileNoSuchFile {
+                        continue
                     } catch {
                         fputs("音声を消せない: \(url.path): \(error)\n", stderr)
                         deleteFailed = true
                     }
                 }
-                if !deleteFailed { print("音声を消した（残すときは --keep-audio）") }
+                if deleted > 0, !deleteFailed { print("音声を消した（残すときは --keep-audio）") }
             }
             let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
                 || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || deleteFailed
