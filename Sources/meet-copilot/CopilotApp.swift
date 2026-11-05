@@ -44,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct CopilotView: View {
     @ObservedObject var model: CopilotModel
+    /// 文字起こし欄を開いているか。次回も覚える。議事録に残るので既定は閉じておく
+    @AppStorage("showsTranscript") private var showsTranscript = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -61,8 +63,20 @@ struct CopilotView: View {
             Text("候補").font(.headline)
             candidates
             Divider()
-            Text("文字起こし").font(.headline)
-            transcript
+            Button {
+                showsTranscript.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: showsTranscript ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                    Text("文字起こし").font(.headline)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if showsTranscript {
+                transcript
+            }
             Divider()
             footer
         }
@@ -143,6 +157,10 @@ struct CopilotView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(height: 150)
+            // 閉じている間に増えた分を飛ばして、開いたときは最新を見せる
+            .onAppear {
+                if let last = model.lines.last?.id { proxy.scrollTo(last, anchor: .bottom) }
+            }
             .onChange(of: model.lines.last?.id) { last in
                 if let last { proxy.scrollTo(last, anchor: .bottom) }
             }
