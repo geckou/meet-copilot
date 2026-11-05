@@ -56,7 +56,8 @@ final class RecordingSession: @unchecked Sendable {
         let recorder = TwoTrackRecorder(
             bundlePrefix: options.bundlePrefix,
             appURL: options.outputDir.appendingPathComponent("app-\(stamp).wav"),
-            micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav")
+            micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav"),
+            voiceProcessing: options.voiceProcessing
         )
         self.recorder = recorder
 

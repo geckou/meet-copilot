@@ -1,6 +1,6 @@
 // meet-copilot の本体。当面はターミナルから swift run で起動する。
 //
-// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe] [--candidates] [--keep-audio]
+// run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe] [--candidates] [--keep-audio] [--no-voice-processing]
 //      swift run meet-copilot answer [--repo <path>...] [--out <dir>]
 //      swift run meet-copilot ui [--out <dir>]
 
@@ -13,7 +13,7 @@ import Transcription
 let usage = """
 usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
                            [--transcribe | --transcriber <command>]
-                           [--candidates | --extractor <command>] [--keep-audio]
+                           [--candidates | --extractor <command>] [--keep-audio] [--no-voice-processing]
        meet-copilot answer [--repo <path>...] [--out <dir>] [--answerer <command>]
        meet-copilot ui [--out <dir>]
 
@@ -28,6 +28,7 @@ record  アプリ音声（相手）とマイク（自分）を別々の WAV に�
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
                  candidates-<日時>.jsonl に書く。--transcribe か --transcriber が要る
   --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
+  --no-voice-processing  マイクのボイス処理（エコー除去）を切る。既定はスピーカーの音の回り込みを抑えるために有効
   --keep-audio   WAV を消さない。文字起こしするときは、停止時に WAV を消すのが既定（文字起こしに失敗があっても消す）
 
 answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリ（--repo が無ければ Web）を
@@ -61,6 +62,7 @@ struct RecordOptions {
     var transcriber: String?
     var extractor: String?
     var keepAudio = false
+    var voiceProcessing = true
     /// 議事録（minutes-<日時>.md）の置き場所。nil なら outputDir
     var minutesDir: URL?
 }
@@ -96,6 +98,8 @@ func parseRecordOptions(_ arguments: ArraySlice<String>) -> RecordOptions {
         case "--extractor":
             guard let v = args.next(), !v.isEmpty else { fail("--extractor に値がない") }
             options.extractor = v
+        case "--no-voice-processing":
+            options.voiceProcessing = false
         case "--keep-audio":
             options.keepAudio = true
         case "-h", "--help":

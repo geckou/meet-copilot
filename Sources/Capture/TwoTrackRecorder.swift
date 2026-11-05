@@ -46,6 +46,7 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     public var onBuffer: (@Sendable (Track, AVAudioPCMBuffer) -> Void)?
 
     private let bundlePrefix: String
+    private let voiceProcessing: Bool
     private let appWriter: TrackWriter
     private let micWriter: TrackWriter
     private let engine = AVAudioEngine()
@@ -56,9 +57,12 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
     private var startTask: Task<[CapturedApp], Error>?
     private var stopTask: Task<RecordingResult, Never>?
 
-    /// - Parameter bundlePrefix: 対象アプリの bundle id 前方一致。空文字で全アプリ
-    public init(bundlePrefix: String, appURL: URL, micURL: URL) {
+    /// - Parameters:
+    ///   - bundlePrefix: 対象アプリの bundle id 前方一致。空文字で全アプリ
+    ///   - voiceProcessing: マイクに macOS のボイス処理（エコー除去）をかける。スピーカーの音がマイクに回り込むのを抑える
+    public init(bundlePrefix: String, appURL: URL, micURL: URL, voiceProcessing: Bool = true) {
         self.bundlePrefix = bundlePrefix
+        self.voiceProcessing = voiceProcessing
         self.appWriter = TrackWriter(name: "app", url: appURL)
         self.micWriter = TrackWriter(name: "mic", url: micURL)
     }
@@ -130,12 +134,27 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
 
         // --- マイク（AVAudioEngine）---
         let input = engine.inputNode
+        // 形式が変わるので、形式を読む前に有効にする。使えなくても録音は続ける
+        var voiceProcessed = false
+        if voiceProcessing {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                voiceProcessed = true
+                // 既定では他のアプリの音量が下がるので、会議の音を下げないようにする
+                if #available(macOS 14.0, *) {
+                    input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+                }
+            } catch {
+                fputs("マイクのボイス処理を有効にできない。回り込みを抑えずに録音する: \(error)\n", stderr)
+            }
+        }
         let micFormat = input.outputFormat(forBus: 0)
         guard micFormat.sampleRate > 0, micFormat.channelCount > 0 else {
             throw CaptureError("マイク入力の形式が取れない: \(micFormat)")
         }
         input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { [micWriter] buffer, _ in
-            micWriter.write(buffer)
+            // ボイス処理中は 9 チャンネルで届き、実機ではどのチャンネルも同じ音だった。1チャンネルだけ使う
+            micWriter.write(voiceProcessed ? firstChannel(of: buffer) ?? buffer : buffer)
         }
         lock.withLock { tapInstalled = true }
         try engine.start()
@@ -225,4 +244,22 @@ public final class TwoTrackRecorder: NSObject, SCStreamOutput, SCStreamDelegate,
         CGRequestScreenCaptureAccess()
         throw CaptureError("画面収録の権限がない。システム設定 > プライバシーとセキュリティ > 画面収録 で実行元のターミナルを許可し、ターミナルを再起動する")
     }
+}
+
+/// 複数チャンネルのバッファの1チャンネル目だけを取り出したモノラルのバッファ。すでにモノラルならそのまま返す
+func firstChannel(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+    guard buffer.format.channelCount > 1 else { return buffer }
+    guard let source = buffer.floatChannelData,
+          let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: buffer.format.sampleRate,
+            channels: 1,
+            interleaved: false
+          ),
+          let mono = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength),
+          let destination = mono.floatChannelData
+    else { return nil }
+    mono.frameLength = buffer.frameLength
+    destination[0].update(from: source[0], count: Int(buffer.frameLength))
+    return mono
 }

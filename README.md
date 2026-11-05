@@ -94,6 +94,7 @@ swift run meet-copilot ui --out ./recordings
 - 議事録の保存先は画面下の「変更...」で選ぶ（次回も覚えている。録音していないときだけ）。選んでいなければ `--out`
 - `transcript` / `candidates` / `answers` の JSON Lines と WAV は機械用で、議事録とは分けて `--out` に置く
 - 権限は起動したターミナルに付く。下の whisper.cpp と Claude Code の準備が要る
+- ヘッドホンなしでも相手の声が「自分」に入りにくいよう、マイクに macOS のボイス処理（エコー除去）をかける。CLI の `record` で切るときは `--no-voice-processing`
 - 終了は画面の「終了」かターミナルの Ctrl-C。録音中なら止めてから終わる。調べている途中の問いは待たない
 
 ### 文字起こし（whisper.cpp）

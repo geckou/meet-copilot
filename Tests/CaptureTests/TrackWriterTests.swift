@@ -61,4 +61,22 @@ final class TrackWriterTests: XCTestCase {
         XCTAssertTrue(summary.description.contains(url.path))
         XCTAssertTrue(summary.description.contains(summary.writeError!))
     }
+
+    func testFirstChannelTakesOnlyTheFirstChannel() throws {
+        // 3チャンネル以上はチャンネル配置を指定しないと作れない
+        let layout = try XCTUnwrap(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 9))
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channelLayout: layout)
+        let source = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4))
+        source.frameLength = 4
+        for channel in 0..<9 {
+            for frame in 0..<4 { source.floatChannelData![channel][frame] = Float(channel) + Float(frame) / 10 }
+        }
+
+        let mono = try XCTUnwrap(firstChannel(of: source))
+
+        XCTAssertEqual(mono.format.channelCount, 1)
+        XCTAssertEqual(mono.format.sampleRate, 48_000)
+        XCTAssertEqual(mono.frameLength, 4)
+        XCTAssertEqual((0..<4).map { mono.floatChannelData![0][$0] }, [0, 0.1, 0.2, 0.3])
+    }
 }
