@@ -28,7 +28,7 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 
 文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。
 
-文字起こしするときは停止時に WAV を消す（README の 6、2026-11-04）。消すのは `Termination`（`Sources/meet-copilot/main.swift`）の終了処理の最後。文字起こしに失敗があっても消す（2026-11-05、明示的に残すとき以外は要らない）。失敗は終了コード 1 で伝える。`--keep-audio` で常に残す。文字起こしなしの録音では消さない。
+文字起こしするときは停止時に WAV を消す（README の 6、2026-11-04）。消すのは `RecordingSession.stop()`（`Sources/meet-copilot/RecordingSession.swift`）の後片付けの最後。文字起こしに失敗があっても消す（2026-11-05、明示的に残すとき以外は要らない）。失敗は終了コード 1 で伝える。`--keep-audio` で常に残す。文字起こしなしの録音では消さない。
 
 - `Sources/ExternalProcess/`：外部プロセスとの受け渡しの共通部分（`JSONLinesProcess`）。起動、標準入力への書き込み、1行1件の JSON の読み取り、終了待ち、失敗の集計。外部に処理を任せる部分を足すときはこれを使う
 - `Sources/Transcription/`：文字起こしプロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
@@ -41,11 +41,19 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。標準ライブラリのみ
 - `scripts/claude_cli.py`：scripts/ から claude -p を呼ぶ共通部分（claude の場所の解決、呼び出し、MCP を読まない、結果の取り出し）。claude -p を使うスクリプトはこれを使う
 
-候補を選んだら調べる部分（README の 5）を追加（2026-10-27）。`answer --repo <path>` を録音とは別のターミナルで動かし、選んだ候補だけ外部プロセス（`scripts/answer_question.py`）に渡す。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡す。
+候補を選んだら調べる部分（README の 5）を追加（2026-10-27）。`answer --repo <path>` を録音とは別のターミナルで動かし、選んだ候補だけ外部プロセス（`scripts/answer_question.py`）に渡す。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡す。`--repo` が無ければ WebSearch / WebFetch だけを渡して Web で調べる（2026-11-05、UI でリポジトリ未選択のとき）。
 
 - `Sources/Candidates/CandidateAnswerer.swift`：調査プロセスとの受け渡し
 - `Sources/meet-copilot/AnswerCommand.swift`：候補の一覧と番号での選択。答えは answers-<日時>.jsonl
 - `Sources/meet-copilot/JSONLinesFile.swift`：transcript / candidates / answers の JSON Lines ファイルの書き足しと読み込みの共通部分
+
+メニューバーの UI を追加（2026-11-04）。`swift run meet-copilot ui` で、録音から候補を押して調べるまでを1画面で扱う。CLI（record / answer）は残す。
+
+- `Sources/meet-copilot/RecordingSession.swift`：録音・文字起こし・候補抽出のつなぎと停止時の後片付け。record と UI で共通
+- `Sources/meet-copilot/CopilotModel.swift`：UI の状態。調査プロセスはリポジトリごとに1つ起動し、候補を押したときだけ問いを渡す
+- `Sources/meet-copilot/CopilotApp.swift`：SwiftUI の `MenuBarExtra`。.app にはまとめず、起動したターミナルに権限が付く
+
+議事録として読めるよう、停止時に `minutes-<日時>.md` を書く（2026-11-05）。中身は transcript / candidates と同じで、時刻順に並べ直したもの。UI では議事録の保存先とリポジトリを画面で選び、次回も覚える。JSON Lines と WAV は `--out` に置き、議事録の保存先には入れない。リポジトリ未選択なら Web で調べる
 
 実機で分かったこと（2026-10-20）：
 - Meet の相手側音声は発言の合間がほぼ無音（-88 dBFS）で、音量による区切りが効く。話し終わりから約1秒で結果が出る
@@ -53,7 +61,7 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - 「もしもし」程度の短い発言は、whisper が「お疲れ様でした」「そうですね」など言っていない文に置き換えることが多い
 
 未検証のまま残っている点：
-- ヘッドホンなしで Meet に出たときの回り込み。相手の声がマイクに入る。対策候補は AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）
+- ヘッドホンなしで Meet に出たときの回り込みの対策。実際の会議（2026-11-05）で「自分」の 402 行のうち 377 行が「相手」と 8 割以上重なった。マイクに AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）を既定で有効にしたが、Chrome の音を除けるかは実機で未確認。効かなければ、重なった「自分」の行を除く案に切り替える
 - 長めの文（質問）での文字起こし精度。静かな環境で確かめる
 
 ## ビルド構成

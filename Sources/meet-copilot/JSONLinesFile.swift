@@ -65,6 +65,13 @@ final class JSONLinesFile: @unchecked Sendable {
         }
     }
 
+    /// 1行分の JSON（改行なし）にする。キーは並べ替え、/ はエスケープしない
+    static func encode<T: Encodable>(_ value: T) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(value)
+    }
+
     /// 1行1件の JSON ファイルを読む。読めない行は飛ばす。ファイルが無ければ空。
     static func read<T: Decodable>(_ type: T.Type, from url: URL) -> [T] {
         guard let data = try? Data(contentsOf: url) else { return [] }

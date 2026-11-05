@@ -34,9 +34,6 @@ func parseAnswerOptions(_ arguments: ArraySlice<String>) -> AnswerOptions {
             fail("不明な引数: \(arg)\n\(usage)")
         }
     }
-    if options.repos.isEmpty, options.answerer == nil {
-        fail("--repo が要る")
-    }
     return options
 }
 
@@ -83,11 +80,33 @@ private struct Meeting {
     }
 }
 
+/// 調査プロセスを起動するコマンド。answer コマンドと UI で共通
+func answererCommand(repos: [String]) -> String {
+    ([scriptCommand("answer_question.py")] + repos.flatMap { ["--repo", shellQuote($0)] }).joined(separator: " ")
+}
+
+/// 候補に前後のやり取り（候補の発言の開始から 120 秒前〜30 秒後）を添えて、調査プロセスに渡す問いにする
+func makeAnswerRequest(meeting: String, candidate: Candidate, transcript: [AnswerRequest.Utterance]) -> AnswerRequest {
+    let range = (candidate.at - 120)...(candidate.at + 30)
+    return AnswerRequest(meeting: meeting, candidate: candidate, context: transcript.filter { range.contains($0.start) })
+}
+
+/// 答え1件を answers-<日時>.jsonl に書き足して閉じる。失敗なら false
+func appendAnswer(_ answer: Answer, toMeeting stamp: String, in dir: URL) -> Bool {
+    do {
+        let file = try JSONLinesFile(url: dir.appendingPathComponent("answers-\(stamp).jsonl"), name: "answers", appending: true)
+        file.append(try JSONLinesFile.encode(answer))
+        let summary = file.close()
+        if summary.failed { fputs(summary.description + "\n", stderr) }
+        return !summary.failed
+    } catch {
+        fputs("answers に書けない: \(error)\n", stderr)
+        return false
+    }
+}
+
 /// 候補を一覧し、選ばれたものだけを調査プロセスに渡して答えを出す。調べに行くのは必ずユーザーの操作が起点。
 private final class AnswerSession: @unchecked Sendable {
-    /// 候補の前後のやり取りとして渡す範囲（候補の発言の開始からの秒数）
-    static let contextBefore: Double = 120
-    static let contextAfter: Double = 30
 
     private let outputDir: URL
     private let lock = NSLock()
@@ -161,13 +180,11 @@ private final class AnswerSession: @unchecked Sendable {
             let candidate = candidates[number - 1]
             let key = Self.key(candidate.at, candidate.question)
             if inProgress.contains(key) { return .inProgress(candidate.question) }
-            let range = (candidate.at - Self.contextBefore)...(candidate.at + Self.contextAfter)
-            let context = JSONLinesFile.read(TranscriptRow.self, from: meeting.transcriptURL)
-                .filter { range.contains($0.start) }
+            let transcript = JSONLinesFile.read(TranscriptRow.self, from: meeting.transcriptURL)
                 .map { AnswerRequest.Utterance(speaker: $0.speaker, start: $0.start, text: $0.text) }
             inProgress.insert(key)
             failed.remove(key)
-            return .request(AnswerRequest(meeting: meeting.stamp, candidate: candidate, context: context))
+            return .request(makeAnswerRequest(meeting: meeting.stamp, candidate: candidate, transcript: transcript))
         }
     }
 
@@ -182,14 +199,10 @@ private final class AnswerSession: @unchecked Sendable {
                     inProgress.remove(key)
                     answered.insert(key)
                 }
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-                if let line = try? encoder.encode(answer) {
-                    if current {
-                        answers?.append(line)
-                    } else if let stamp = answer.meeting {
-                        appendAnswer(line, toMeeting: stamp)
-                    }
+                if current {
+                    if let line = try? JSONLinesFile.encode(answer) { answers?.append(line) }
+                } else if let stamp = answer.meeting, !appendAnswer(answer, toMeeting: stamp, in: outputDir) {
+                    answersFailed = true
                 }
 
                 let sources = answer.sources.map { source in source.line.map { "\(source.path):\($0)" } ?? source.path }
@@ -213,22 +226,6 @@ private final class AnswerSession: @unchecked Sendable {
         }
     }
 
-    /// いま開いていない録音の answers ファイルに1件書き足す
-    private func appendAnswer(_ line: Data, toMeeting stamp: String) {
-        do {
-            let file = try JSONLinesFile(url: Meeting.answersURL(in: outputDir, stamp: stamp), name: "answers", appending: true)
-            file.append(line)
-            let summary = file.close()
-            if summary.failed {
-                fputs(summary.description + "\n", stderr)
-                answersFailed = true
-            }
-        } catch {
-            fputs("answers のファイルを開けない: \(error)\n", stderr)
-            answersFailed = true
-        }
-    }
-
     /// answers のファイルを閉じる。書き込みに失敗していれば false
     func close() -> Bool {
         lock.withLock {
@@ -248,7 +245,7 @@ private final class AnswerSession: @unchecked Sendable {
 
 func answer(_ options: AnswerOptions) -> Never {
     let command = options.answerer
-        ?? ([scriptCommand("answer_question.py")] + options.repos.flatMap { ["--repo", shellQuote($0)] }).joined(separator: " ")
+        ?? answererCommand(repos: options.repos)
     let session = AnswerSession(outputDir: options.outputDir)
     let answerer = CandidateAnswerer(command: command) { session.receive($0) }
     do {
@@ -257,8 +254,8 @@ func answer(_ options: AnswerOptions) -> Never {
         fail("調査プロセスを起動できない: \(error)")
     }
 
-    if !options.repos.isEmpty {
-        print("調べる対象: " + options.repos.joined(separator: ", "))
+    if options.answerer == nil {
+        print("調べる対象: " + (options.repos.isEmpty ? "Web（--repo なし）" : options.repos.joined(separator: ", ")))
     }
 
     // q・入力の終わり・Ctrl-C・調査プロセスの終了のどれでも、受け取った問いを調べ終えてから閉じる。
