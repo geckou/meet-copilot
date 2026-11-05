@@ -141,15 +141,19 @@ def serve(args):
     except (RuntimeError, OSError) as error:
         log(str(error))
         url = ""
-    publish_url(args.url_file, url)
-    sys.stdin.buffer.read()
-    # 文字起こし役が読み終えているので、ここで消してよい
-    os.unlink(args.url_file)
+    # whisper-server は別グループで動くので、ここで止めないと失敗時にモデルを抱えたまま残る
+    try:
+        publish_url(args.url_file, url)
+        sys.stdin.buffer.read()
+        # 文字起こし役が読み終えているので、ここで消してよい
+        os.unlink(args.url_file)
+    finally:
+        crashed = server is not None and server.poll() is not None
+        if server is not None:
+            server.terminate()
+            server.wait()
     if server is None:
         sys.exit(1)
-    crashed = server.poll() is not None
-    server.terminate()
-    server.wait()
     if crashed:
         log(f"whisper-server が途中で終了した（終了コード {server.returncode}）")
         sys.exit(1)
