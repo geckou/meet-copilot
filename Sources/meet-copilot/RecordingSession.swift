@@ -60,6 +60,15 @@ final class RecordingSession: @unchecked Sendable {
         )
         self.recorder = recorder
 
+        // 途中で失敗したら、それまでに起動したプロセスの入力を閉じて終わらせ、開いたファイルを閉じる。
+        // UI は失敗しても動き続けるので、残すと開始を押し直すたびにプロセスが溜まる
+        var rollbacks: [@Sendable () async -> Void] = []
+        func failure(_ message: String) -> SessionError {
+            let pending = rollbacks
+            Task.detached { for rollback in pending.reversed() { await rollback() } }
+            return SessionError(message)
+        }
+
         var transcribers: [(Track, TranscriberProcess)] = []
         var transcript: Transcript?
         if let command = options.transcriber {
@@ -67,8 +76,9 @@ final class RecordingSession: @unchecked Sendable {
             do {
                 output = try Transcript(url: options.outputDir.appendingPathComponent("transcript-\(stamp).jsonl"))
             } catch {
-                throw SessionError("文字起こしのファイルを作れない: \(error)")
+                throw failure("文字起こしのファイルを作れない: \(error)")
             }
+            rollbacks.append { _ = output.close() }
             for track in [Track.app, .mic] {
                 let transcriber = TranscriberProcess(
                     command: command,
@@ -80,8 +90,9 @@ final class RecordingSession: @unchecked Sendable {
                 do {
                     try transcriber.start()
                 } catch {
-                    throw SessionError("文字起こしプロセスを起動できない: \(error)")
+                    throw failure("文字起こしプロセスを起動できない: \(error)")
                 }
+                rollbacks.append { _ = await transcriber.finish() }
                 transcribers.append((track, transcriber))
             }
             let byTrack = Dictionary(uniqueKeysWithValues: transcribers)
@@ -98,8 +109,9 @@ final class RecordingSession: @unchecked Sendable {
             do {
                 log = try CandidateLog(url: options.outputDir.appendingPathComponent("candidates-\(stamp).jsonl"))
             } catch {
-                throw SessionError("候補のファイルを作れない: \(error)")
+                throw failure("候補のファイルを作れない: \(error)")
             }
+            rollbacks.append { _ = log.close() }
             let process = CandidateExtractor(command: command) { candidate in
                 log.append(candidate)
                 onCandidate(candidate)
@@ -107,7 +119,7 @@ final class RecordingSession: @unchecked Sendable {
             do {
                 try process.start()
             } catch {
-                throw SessionError("候補抽出プロセスを起動できない: \(error)")
+                throw failure("候補抽出プロセスを起動できない: \(error)")
             }
             transcript.onRecord = { process.send($0) }
             extractor = process

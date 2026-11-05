@@ -21,7 +21,8 @@ final class CopilotModel: ObservableObject {
 
     enum AnswerStatus {
         case none
-        case inProgress
+        /// 調べている調査プロセス。終了したときに、そのプロセスに渡した問いだけを失敗にする
+        case inProgress(ObjectIdentifier)
         case answered(Answer)
         case failed(String)
     }
@@ -29,8 +30,6 @@ final class CopilotModel: ObservableObject {
     struct Item: Identifiable {
         let id = UUID()
         let meeting: String
-        /// 録音の保存先。答えも同じ場所の answers-<日時>.jsonl に書く
-        let dir: URL
         let candidate: Candidate
         var status: AnswerStatus = .none
     }
@@ -144,7 +143,7 @@ final class CopilotModel: ObservableObject {
 
     private func add(_ candidate: Candidate) {
         guard let session else { return }
-        items.append(Item(meeting: session.stamp, dir: session.outputDir, candidate: candidate))
+        items.append(Item(meeting: session.stamp, candidate: candidate))
     }
 
     // MARK: 調べる
@@ -168,7 +167,7 @@ final class CopilotModel: ObservableObject {
         guard let answerer = answerer(for: repoPath) else { return }
         let item = items[index]
         let transcript = lines.map { AnswerRequest.Utterance(speaker: $0.speaker, start: $0.start, text: $0.text) }
-        items[index].status = .inProgress
+        items[index].status = .inProgress(ObjectIdentifier(answerer))
         answerer.ask(makeAnswerRequest(meeting: item.meeting, candidate: item.candidate, transcript: transcript))
     }
 
@@ -199,12 +198,14 @@ final class CopilotModel: ObservableObject {
         return answerer
     }
 
+    /// 終わったプロセスに渡して答えが返っていない問いを失敗にする。repo を切り替えた前のプロセスも同じ
     private func answererExited(_ exited: CandidateAnswerer) {
-        guard answerer === exited else { return }
-        answerer = nil
-        answererRepo = nil
+        if answerer === exited {
+            answerer = nil
+            answererRepo = nil
+        }
         for index in items.indices {
-            if case .inProgress = items[index].status {
+            if case .inProgress(let owner) = items[index].status, owner == ObjectIdentifier(exited) {
                 items[index].status = .failed("調査プロセスが終了した。起動したターミナルの出力を参照")
             }
         }
@@ -213,10 +214,11 @@ final class CopilotModel: ObservableObject {
     private func receive(_ result: AnswerResult) {
         switch result {
         case .answered(let answer):
-            guard let index = index(meeting: answer.meeting, at: answer.at, question: answer.question) else { return }
-            if let meeting = answer.meeting, !appendAnswer(answer, toMeeting: meeting, in: items[index].dir) {
+            // 次の録音を始めて候補の一覧が入れ替わっていても、答えは問いを出した録音の answers に残す
+            if let meeting = answer.meeting, !appendAnswer(answer, toMeeting: meeting, in: outputDir) {
                 message = "答えをファイルに書けなかった"
             }
+            guard let index = index(meeting: answer.meeting, at: answer.at, question: answer.question) else { return }
             items[index].status = .answered(answer)
         case .failed(let failure):
             guard let index = index(meeting: failure.meeting, at: failure.at, question: failure.question) else { return }
