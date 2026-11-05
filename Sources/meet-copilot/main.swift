@@ -1,7 +1,8 @@
 // meet-copilot の本体。当面はターミナルから swift run で起動する。
 //
 // run: swift run meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>] [--transcribe] [--candidates] [--keep-audio]
-//      swift run meet-copilot answer --repo <path> [--repo <path>...] [--out <dir>]
+//      swift run meet-copilot answer [--repo <path>...] [--out <dir>]
+//      swift run meet-copilot ui [--out <dir>]
 
 import Candidates
 import Capture
@@ -13,13 +14,15 @@ let usage = """
 usage: meet-copilot record [--app <bundle id prefix>] [--out <dir>] [--duration <sec>]
                            [--transcribe | --transcriber <command>]
                            [--candidates | --extractor <command>] [--keep-audio]
-       meet-copilot answer --repo <path> [--repo <path>...] [--out <dir>] [--answerer <command>]
+       meet-copilot answer [--repo <path>...] [--out <dir>] [--answerer <command>]
+       meet-copilot ui [--out <dir>]
 
 record  アプリ音声（相手）とマイク（自分）を別々の WAV に書き出す
   --app          対象アプリの bundle id 前方一致（既定: com.google.Chrome、空文字で全アプリ）
   --out          出力ディレクトリ（既定: カレントディレクトリ）
   --duration     録音秒数。省略時は Ctrl-C まで
-  --transcribe   whisper.cpp（scripts/transcribe_whisper.py）で文字起こしし、transcript-<日時>.jsonl に書く
+  --transcribe   whisper.cpp（scripts/transcribe_whisper.py）で文字起こしし、transcript-<日時>.jsonl に書く。
+                 停止時に読む用の議事録 minutes-<日時>.md も書く
   --transcriber  文字起こしに使うコマンド（/bin/sh -c で実行）。トラックごとに1つ起動し、
                  環境変数 MEET_COPILOT_TRACK に app / mic を渡す
   --candidates   文字起こしから相手が答えを求めている箇所を claude -p（scripts/extract_candidates.py）で抜き出し、
@@ -27,11 +30,16 @@ record  アプリ音声（相手）とマイク（自分）を別々の WAV に�
   --extractor    候補の抽出に使うコマンド（/bin/sh -c で実行）
   --keep-audio   文字起こしが終わっても WAV を消さない。文字起こしするときは、成功したら WAV を消すのが既定
 
-answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリを claude -p（scripts/answer_question.py）で調べて答える。
+answer  record の候補を一覧し、選んだ候補だけローカルのリポジトリ（--repo が無ければ Web）を
+        claude -p（scripts/answer_question.py）で調べて答える。
         record とは別のターミナルで動かす。答えは answers-<日時>.jsonl に書き足す
-  --repo         調べるリポジトリ。複数指定できる。1つ目を claude の作業ディレクトリにする
+  --repo         調べるリポジトリ。複数指定できる。1つ目を claude の作業ディレクトリにする。省略時は Web で調べる
   --out          record の出力ディレクトリ（既定: カレントディレクトリ）。いちばん新しい candidates-<日時>.jsonl を使う
   --answerer     調べるのに使うコマンド（/bin/sh -c で実行）。指定したときは --repo を渡さない
+
+ui      メニューバーに常駐し、録音・文字起こし・候補・調査を1画面で扱う。record --transcribe --candidates と answer をまとめたもの
+  --out          録音・文字起こし・候補・答えのファイルの置き場所（既定: カレントディレクトリ）。
+                 議事録は画面で選んだ保存先に書く（選んでいなければここ）
 """
 
 /// シェルのシングルクォートで囲む。中の ' は '\'' に置き換える
@@ -53,6 +61,8 @@ struct RecordOptions {
     var transcriber: String?
     var extractor: String?
     var keepAudio = false
+    /// 議事録（minutes-<日時>.md）の置き場所。nil なら outputDir
+    var minutesDir: URL?
 }
 
 func fail(_ message: String) -> Never {
@@ -116,34 +126,15 @@ func report(_ exit: ProcessExit, of name: String) -> Bool {
 }
 
 /// タイマー・Ctrl-C・起動失敗・ストリーム停止のどこから終了しても、結果の表示と exit を1回にまとめる。
-/// 終了コードは失敗を優先する。停止待ちの間に届いた失敗、起動の失敗、WAV の書き込み失敗、
-/// 文字起こし・候補抽出プロセスの異常終了も反映する。
-/// 文字起こしが最後まで成功したら、keepAudio でない限り WAV を消す。残すのは文字起こしと候補だけ。
+/// 終了コードは失敗を優先する。後片付けと失敗の集計は RecordingSession.stop() に任せる。
 final class Termination: @unchecked Sendable {
-    private let recorder: TwoTrackRecorder
-    private let keepAudio: Bool
-    private let transcribers: [(Track, TranscriberProcess)]
-    private let transcript: Transcript?
-    private let extractor: CandidateExtractor?
-    private let candidateLog: CandidateLog?
+    private let session: RecordingSession
     private let lock = NSLock()
     private var exitCode: Int32 = 0
     private var finishing = false
 
-    init(
-        recorder: TwoTrackRecorder,
-        transcribers: [(Track, TranscriberProcess)],
-        transcript: Transcript?,
-        extractor: CandidateExtractor?,
-        candidateLog: CandidateLog?,
-        keepAudio: Bool
-    ) {
-        self.recorder = recorder
-        self.keepAudio = keepAudio
-        self.transcribers = transcribers
-        self.transcript = transcript
-        self.extractor = extractor
-        self.candidateLog = candidateLog
+    init(session: RecordingSession) {
+        self.session = session
     }
 
     func finish(exitCode code: Int32) {
@@ -154,142 +145,25 @@ final class Termination: @unchecked Sendable {
         }
         guard first else { return }
         Task.detached { [self] in
-            let result = await recorder.stop()
-            // 録音を止めると入力が閉じられ、文字起こしプロセスは残りを処理してから終わる
-            var transcriberFailed = false
-            if !transcribers.isEmpty {
-                print("\n文字起こしの残りを処理中...")
-                for (track, transcriber) in transcribers {
-                    let exit = await transcriber.finish()
-                    if !report(exit, of: "[\(track.rawValue)] 文字起こしプロセス") { transcriberFailed = true }
-                }
-            }
-            // 文字起こしが出し切られてから入力を閉じ、候補抽出プロセスは残りを処理してから終わる
-            var extractorFailed = false
-            if let extractor {
-                print("\n候補の抽出の残りを処理中...")
-                extractorFailed = !report(await extractor.finish(), of: "候補抽出プロセス")
-            }
-            // 起動の失敗は stop() の結果から出す。Ctrl-C で先に終了処理が始まっていても取りこぼさない
-            if let startError = result.startError {
-                fputs("error: \(startError)\n", stderr)
-            }
-            print("\n--- 結果 ---")
-            print(result.app)
-            print(result.mic)
-            var transcriptFailed = false
-            if let transcript {
-                let summary = transcript.close()
-                print(summary.description)
-                transcriptFailed = summary.failed
-            }
-            var candidateLogFailed = false
-            if let candidateLog {
-                let summary = candidateLog.close()
-                print(summary.description)
-                candidateLogFailed = summary.failed
-            }
-            var deleteFailed = false
-            let audio = [result.app.url, result.mic.url].filter { FileManager.default.fileExists(atPath: $0.path) }
-            if transcript != nil, !keepAudio, !audio.isEmpty {
-                if transcriberFailed || transcriptFailed || result.startError != nil {
-                    print("文字起こしが欠けている可能性があるので、音声は残す")
-                } else {
-                    for url in audio {
-                        do {
-                            try FileManager.default.removeItem(at: url)
-                        } catch {
-                            fputs("音声を消せない: \(url.path): \(error)\n", stderr)
-                            deleteFailed = true
-                        }
-                    }
-                    if !deleteFailed { print("文字起こしが終わったので音声を消した（残すときは --keep-audio）") }
-                }
-            }
-            let failed = result.startError != nil || result.app.writeError != nil || result.mic.writeError != nil
-                || transcriberFailed || transcriptFailed || extractorFailed || candidateLogFailed || deleteFailed
-            exit(lock.withLock { max(exitCode, failed ? 1 : 0) })
+            let succeeded = await session.stop()
+            exit(lock.withLock { max(exitCode, succeeded ? 0 : 1) })
         }
     }
 }
 
 func record(_ options: RecordOptions) -> Never {
+    let session: RecordingSession
     do {
-        try FileManager.default.createDirectory(at: options.outputDir, withIntermediateDirectories: true)
+        session = try RecordingSession(options: options)
     } catch {
-        fail("出力ディレクトリを作れない: \(error)")
+        fail("\(error)")
     }
-
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyyMMdd-HHmmss"
-    // AVAudioFile は既存ファイルを上書きするので、同じ秒に起動しても衝突しないよう短い乱数を足す
-    let suffix = UUID().uuidString.prefix(6).lowercased()
-    let stamp = "\(formatter.string(from: Date()))-\(suffix)"
-    let recorder = TwoTrackRecorder(
-        bundlePrefix: options.bundlePrefix,
-        appURL: options.outputDir.appendingPathComponent("app-\(stamp).wav"),
-        micURL: options.outputDir.appendingPathComponent("mic-\(stamp).wav")
-    )
-
-    var transcribers: [(Track, TranscriberProcess)] = []
-    var transcript: Transcript?
-    if let command = options.transcriber {
-        let output: Transcript
-        do {
-            output = try Transcript(url: options.outputDir.appendingPathComponent("transcript-\(stamp).jsonl"))
-        } catch {
-            fail("文字起こしのファイルを作れない: \(error)")
-        }
-        for track in [Track.app, .mic] {
-            let transcriber = TranscriberProcess(
-                command: command,
-                environment: ["MEET_COPILOT_TRACK": track.rawValue]
-            ) { output.append($0, track: track) }
-            do {
-                try transcriber.start()
-            } catch {
-                fail("文字起こしプロセスを起動できない: \(error)")
-            }
-            transcribers.append((track, transcriber))
-        }
-        let byTrack = Dictionary(uniqueKeysWithValues: transcribers)
-        recorder.onBuffer = { track, buffer in byTrack[track]?.append(buffer) }
-        transcript = output
-    }
-
-    var extractor: CandidateExtractor?
-    var candidateLog: CandidateLog?
-    if let command = options.extractor, let transcript {
-        let log: CandidateLog
-        do {
-            log = try CandidateLog(url: options.outputDir.appendingPathComponent("candidates-\(stamp).jsonl"))
-        } catch {
-            fail("候補のファイルを作れない: \(error)")
-        }
-        let process = CandidateExtractor(command: command) { log.append($0) }
-        do {
-            try process.start()
-        } catch {
-            fail("候補抽出プロセスを起動できない: \(error)")
-        }
-        transcript.onRecord = { process.send($0) }
-        extractor = process
-        candidateLog = log
-    }
-
-    let termination = Termination(
-        recorder: recorder,
-        transcribers: transcribers,
-        transcript: transcript,
-        extractor: extractor,
-        candidateLog: candidateLog,
-        keepAudio: options.keepAudio
-    )
+    let termination = Termination(session: session)
     @Sendable func finish(exitCode: Int32) {
         termination.finish(exitCode: exitCode)
     }
 
-    recorder.onUnexpectedStop = { error in
+    session.onUnexpectedStop = { error in
         fputs("ストリームが停止した: \(error)\n", stderr)
         finish(exitCode: 1)
     }
@@ -301,11 +175,7 @@ func record(_ options: RecordOptions) -> Never {
 
     Task.detached {
         do {
-            let apps = try await recorder.start()
-            print("対象アプリ:")
-            for app in apps {
-                print("  \(app.bundleIdentifier) (pid \(app.processID)) \(app.name)")
-            }
+            _ = try await session.start()
         } catch {
             // エラーの表示は終了処理で stop() の結果から出す
             finish(exitCode: 1)
@@ -329,6 +199,21 @@ case "record":
     record(parseRecordOptions(arguments.dropFirst()))
 case "answer":
     answer(parseAnswerOptions(arguments.dropFirst()))
+case "ui":
+    var args = arguments.dropFirst().makeIterator()
+    while let arg = args.next() {
+        switch arg {
+        case "--out":
+            guard let v = args.next() else { fail("--out に値がない") }
+            CopilotApp.outputDir = URL(fileURLWithPath: v).standardizedFileURL
+        case "-h", "--help":
+            print(usage)
+            exit(0)
+        default:
+            fail("不明な引数: \(arg)\n\(usage)")
+        }
+    }
+    CopilotApp.main()
 case "-h", "--help", nil:
     print(usage)
     exit(arguments.isEmpty ? 1 : 0)

@@ -82,6 +82,20 @@ swift run meet-copilot record --duration 30 --out ./recordings
 - 権限はターミナル側に付く。初回はマイクと画面収録の許可が要り、画面収録の許可後はターミナルの再起動が要る
 - テストは `swift test`
 
+### メニューバーから使う
+
+```sh
+swift run meet-copilot ui --out ./recordings
+```
+
+- メニューバーに常駐し、1つの画面で録音の開始・停止、文字起こし、候補の一覧、候補を押したときの調査を扱う。`record --transcribe --candidates` と `answer` をまとめたもの
+- 調べるリポジトリは画面の「選ぶ...」で指定する（次回も覚えている）。未選択か「外す」を押した状態なら Web で調べる
+- 停止すると、読む用の議事録 `minutes-<日時>.md` を書く。出た問いの一覧と、時刻順の発言（同じ話者が続く分は1段落）
+- 議事録の保存先は画面下の「変更...」で選ぶ（次回も覚えている。録音していないときだけ）。選んでいなければ `--out`
+- `transcript` / `candidates` / `answers` の JSON Lines と WAV は機械用で、議事録とは分けて `--out` に置く
+- 権限は起動したターミナルに付く。下の whisper.cpp と Claude Code の準備が要る
+- 終了は画面の「終了」かターミナルの Ctrl-C。録音中なら止めてから終わる。調べている途中の問いは待たない
+
 ### 文字起こし（whisper.cpp）
 
 初回のみ whisper.cpp とモデル（large-v3-turbo、約1.6GB）を入れる。
@@ -124,6 +138,7 @@ swift run meet-copilot answer --repo ~/path/to/repo --out ./recordings
 
 - `--out` の中でいちばん新しい `candidates-<日時>.jsonl` の候補を番号付きで並べる。Enter で一覧を更新（新しい録音が始まっていれば切り替え）、番号で調べる（番号は表示中の一覧のもの）、`q` か Ctrl-C で終了。終了時は調べている途中の問いを待つ
 - 選んだ候補だけ、前後 2 分半のやり取りを添えて `claude -p` に渡す。ツールは Read / Grep / Glob のみ（読み取りだけ）で、1つ目の `--repo` を作業ディレクトリ、残りを `--add-dir` にする
+- `--repo` を省くと Web で調べる。ツールは WebSearch / WebFetch のみで、空の一時ディレクトリで動かす。根拠には URL が入る。検索語として問いの内容が検索に渡る
 - 答えは会議でそのまま言える 2〜3 文（120 字程度）と、根拠のファイル・行、確度（high / medium / low）。端末に出し、`answers-<日時>.jsonl` に書き足す。調べ終えた候補には ✓、調べられなかった候補には ✗ が付く。調べている間に録音が切り替わっても、答えは問いを出した録音の answers に入る
 - 調べる仕組みは `--answerer <command>` で差し替えられる。受け渡しの約束は `Sources/Candidates/CandidateAnswerer.swift` の冒頭を参照
 

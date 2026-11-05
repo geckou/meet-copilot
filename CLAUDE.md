@@ -41,11 +41,19 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。標準ライブラリのみ
 - `scripts/claude_cli.py`：scripts/ から claude -p を呼ぶ共通部分（claude の場所の解決、呼び出し、MCP を読まない、結果の取り出し）。claude -p を使うスクリプトはこれを使う
 
-候補を選んだら調べる部分（README の 5）を追加（2026-10-27）。`answer --repo <path>` を録音とは別のターミナルで動かし、選んだ候補だけ外部プロセス（`scripts/answer_question.py`）に渡す。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡す。
+候補を選んだら調べる部分（README の 5）を追加（2026-10-27）。`answer --repo <path>` を録音とは別のターミナルで動かし、選んだ候補だけ外部プロセス（`scripts/answer_question.py`）に渡す。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡す。`--repo` が無ければ WebSearch / WebFetch だけを渡して Web で調べる（2026-11-05、UI でリポジトリ未選択のとき）。
 
 - `Sources/Candidates/CandidateAnswerer.swift`：調査プロセスとの受け渡し
 - `Sources/meet-copilot/AnswerCommand.swift`：候補の一覧と番号での選択。答えは answers-<日時>.jsonl
 - `Sources/meet-copilot/JSONLinesFile.swift`：transcript / candidates / answers の JSON Lines ファイルの書き足しと読み込みの共通部分
+
+メニューバーの UI を追加（2026-11-04）。`swift run meet-copilot ui` で、録音から候補を押して調べるまでを1画面で扱う。CLI（record / answer）は残す。
+
+- `Sources/meet-copilot/RecordingSession.swift`：録音・文字起こし・候補抽出のつなぎと停止時の後片付け。record と UI で共通
+- `Sources/meet-copilot/CopilotModel.swift`：UI の状態。調査プロセスはリポジトリごとに1つ起動し、候補を押したときだけ問いを渡す
+- `Sources/meet-copilot/CopilotApp.swift`：SwiftUI の `MenuBarExtra`。.app にはまとめず、起動したターミナルに権限が付く
+
+議事録として読めるよう、停止時に `minutes-<日時>.md` を書く（2026-11-05）。中身は transcript / candidates と同じで、時刻順に並べ直したもの。UI では議事録の保存先とリポジトリを画面で選び、次回も覚える。JSON Lines と WAV は `--out` に置き、議事録の保存先には入れない。リポジトリ未選択なら Web で調べる
 
 実機で分かったこと（2026-10-20）：
 - Meet の相手側音声は発言の合間がほぼ無音（-88 dBFS）で、音量による区切りが効く。話し終わりから約1秒で結果が出る

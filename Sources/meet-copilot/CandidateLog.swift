@@ -5,6 +5,10 @@ import Foundation
 final class CandidateLog: @unchecked Sendable {
     private let file: JSONLinesFile
     private let queue = DispatchQueue(label: "candidates")
+    private var received: [Candidate] = []
+
+    /// これまでに届いた候補（議事録用）
+    var candidates: [Candidate] { queue.sync { received } }
 
     init(url: URL) throws {
         file = try JSONLinesFile(url: url, name: "candidates")
@@ -13,9 +17,8 @@ final class CandidateLog: @unchecked Sendable {
     func append(_ candidate: Candidate) {
         queue.sync {
             print("[候補 \(formatTime(candidate.at))] \(candidate.question)\n    「\(candidate.quote)」")
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            guard let line = try? encoder.encode(candidate) else { return }
+            received.append(candidate)
+            guard let line = try? JSONLinesFile.encode(candidate) else { return }
             file.append(line)
         }
     }
