@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 
-from claude_cli import ClaudeError, add_claude_arguments, find_claude, format_time, run_claude
+from claude_cli import ClaudeError, add_claude_arguments, format_time, require_claude, run_claude
 
 REPO_TOOLS = ("Read", "Grep", "Glob")
 WEB_TOOLS = ("WebSearch", "WebFetch")
@@ -136,11 +136,7 @@ def main():
     # Ctrl-C は呼び出し元が受ける。こちらは標準入力が閉じられるまで受け取った問いを処理する
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = parse_args()
-    try:
-        args.claude_bin = find_claude(args.claude_bin)
-    except ClaudeError as error:
-        log(str(error))
-        sys.exit(1)
+    require_claude(args, log)
 
     workdir = None if args.repo else tempfile.TemporaryDirectory(prefix="meet-copilot-answer-")
     args.workdir = workdir and workdir.name

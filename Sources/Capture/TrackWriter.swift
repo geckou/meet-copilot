@@ -4,8 +4,9 @@ import Foundation
 /// 1トラック分の書き出し結果。
 public struct TrackSummary: Sendable, CustomStringConvertible {
     public let name: String
-    public let url: URL
-    /// 最初のバッファの形式。何も書き込まれていなければ nil
+    /// 書き出し先。nil なら書き出していない
+    public let url: URL?
+    /// 最初のバッファの形式。何も届いていなければ nil
     public let inputFormat: String?
     public let seconds: Double
     public let peakDBFS: Float
@@ -15,11 +16,12 @@ public struct TrackSummary: Sendable, CustomStringConvertible {
     public var description: String {
         guard let inputFormat else {
             if let writeError {
-                return "[\(name)] ファイルを作れなかった: \(url.path)\n  \(writeError)"
+                return "[\(name)] ファイルを作れなかった: \(url?.path ?? "")\n  \(writeError)"
             }
-            return "[\(name)] 何も書き込まれていない（ファイル未作成）"
+            return "[\(name)] 音声が届いていない"
         }
-        var line = String(format: "[%@] %.2f 秒, ピーク %.1f dBFS, %@", name, seconds, peakDBFS, url.path)
+        var line = String(format: "[%@] %.2f 秒, ピーク %.1f dBFS", name, seconds, peakDBFS)
+        if let url { line += ", \(url.path)" }
         line += "\n  入力形式: \(inputFormat)"
         if let writeError {
             line += "\n  書き込み失敗で途中から捨てた: \(writeError)"
@@ -28,11 +30,11 @@ public struct TrackSummary: Sendable, CustomStringConvertible {
     }
 }
 
-/// 最初のバッファの形式で WAV（16bit PCM）を開き、以降のバッファを書き足す。
+/// 最初のバッファの形式で WAV（16bit PCM）を開き、以降のバッファを書き足す。URL が nil なら書かず、秒数とピークだけ数える。
 /// 2トラックの長さを揃えるため、arm() されるまでのバッファと disarm() 以降のバッファは捨てる。
 final class TrackWriter: @unchecked Sendable {
     let name: String
-    let url: URL
+    let url: URL?
     private let queue: DispatchQueue
     private var file: AVAudioFile?
     private var armed = false
@@ -45,7 +47,7 @@ final class TrackWriter: @unchecked Sendable {
     /// バッファは呼び出し後に使い回されうるので、保持せずにその場で使う
     var onAccepted: ((AVAudioPCMBuffer) -> Void)?
 
-    init(name: String, url: URL) {
+    init(name: String, url: URL?) {
         self.name = name
         self.url = url
         self.queue = DispatchQueue(label: "writer.\(name)")
@@ -57,7 +59,7 @@ final class TrackWriter: @unchecked Sendable {
             guard armed, !closed, buffer.frameLength > 0 else { return }
             onAccepted?(buffer)
             do {
-                if file == nil {
+                if let url, file == nil {
                     let format = buffer.format
                     let settings: [String: Any] = [
                         AVFormatIDKey: kAudioFormatLinearPCM,
@@ -74,9 +76,9 @@ final class TrackWriter: @unchecked Sendable {
                         commonFormat: format.commonFormat,
                         interleaved: format.isInterleaved
                     )
-                    inputFormat = format
                 }
                 try file?.write(from: buffer)
+                if inputFormat == nil { inputFormat = buffer.format }
                 framesWritten += AVAudioFramePosition(buffer.frameLength)
                 peak = max(peak, Self.peak(of: buffer))
             } catch {

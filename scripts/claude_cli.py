@@ -1,11 +1,13 @@
 """scripts/ の外部プロセスから claude -p を呼ぶための共通部分。標準ライブラリだけで動く。"""
 
+import argparse
 import glob
 import json
 import math
 import os
 import shutil
 import subprocess
+import sys
 
 
 class ClaudeError(RuntimeError):
@@ -14,8 +16,6 @@ class ClaudeError(RuntimeError):
 
 def positive(value):
     """argparse の type 用。正の有限の数だけ受け付ける。"""
-    import argparse
-
     number = float(value)
     if not (math.isfinite(number) and number > 0):
         raise argparse.ArgumentTypeError("正の有限の数")
@@ -60,6 +60,15 @@ def find_claude(explicit):
     raise ClaudeError("claude が見つからない。--claude-bin か環境変数 MEET_COPILOT_CLAUDE で場所を指定する")
 
 
+def require_claude(args, log):
+    """args.claude_bin を絶対パスに解決する。見つからなければログを出して終了する。"""
+    try:
+        args.claude_bin = find_claude(args.claude_bin)
+    except ClaudeError as error:
+        log(str(error))
+        sys.exit(1)
+
+
 def format_time(seconds):
     minutes = int(seconds // 60)
     return f"{minutes:02d}:{seconds - minutes * 60:04.1f}"
@@ -71,6 +80,7 @@ def run_claude(claude_bin, prompt, *, model, schema, timeout, cwd, system_prompt
 
     - tools：使わせるツール（例：("Read", "Grep", "Glob")）。空ならツールなし。指定したものは確認なしで許可する
     - MCP は読み込まない（起動が遅くなり、会議の内容を外のサービスに渡しうるため）
+    - ユーザー全体の設定（~/.claude/CLAUDE.md など）は読み込まない。話し方の指示などが答えに混ざるのを防ぐ
     - 失敗は ClaudeError、時間切れは subprocess.TimeoutExpired
     """
     command = [
@@ -78,6 +88,7 @@ def run_claude(claude_bin, prompt, *, model, schema, timeout, cwd, system_prompt
         "--model", model,
         "--tools", ",".join(tools),
         "--strict-mcp-config",
+        "--setting-sources", "project,local",
         "--no-session-persistence",
         "--output-format", "json",
         "--json-schema", json.dumps(schema),

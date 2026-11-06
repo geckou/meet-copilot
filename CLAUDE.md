@@ -26,9 +26,9 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - `Sources/meet-copilot/`：実行ターゲット。当面は CLI のサブコマンドのみ
 - `Tests/CaptureTests/`：`TrackWriter` の単体テスト（`swift test`）
 
-文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。
+文字起こしは whisper.cpp（ローカル）に決定（2026-10-15）。`record --transcribe` でトラックごとに外部プロセス（`scripts/transcribe_whisper.py`）を起動し、音声を標準入力に流して結果を JSON Lines で受け取る。whisper-server は管理役（同スクリプトの `--serve`）が1つ立てて両トラックで共有する（2026-11-05、モデルを二重に読まない）。URL は `--url-file` で受け渡す。
 
-文字起こしするときは停止時に WAV を消す（README の 6、2026-11-04）。消すのは `RecordingSession.stop()`（`Sources/meet-copilot/RecordingSession.swift`）の後片付けの最後。文字起こしに失敗があっても消す（2026-11-05、明示的に残すとき以外は要らない）。失敗は終了コード 1 で伝える。`--keep-audio` で常に残す。文字起こしなしの録音では消さない。
+文字起こしするときは WAV を書かない（README の 6、2026-11-05。書いて消すだけで使い道がなく、異常終了すると生音声が残るため）。失敗は終了コード 1 で伝える。`--keep-audio` で書き出す。文字起こしなしの録音では常に書き出す。
 
 - `Sources/ExternalProcess/`：外部プロセスとの受け渡しの共通部分（`JSONLinesProcess`）。起動、標準入力への書き込み、1行1件の JSON の読み取り、終了待ち、失敗の集計。外部に処理を任せる部分を足すときはこれを使う
 - `Sources/Transcription/`：文字起こしプロセスとの受け渡し（`TranscriberProcess`）。16kHz・モノラル・16bit への変換もここ
@@ -38,8 +38,8 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 候補の抽出は `claude -p`（ツールなし、`--json-schema` で出力を固定）に決定（2026-10-20）。`record --candidates` で外部プロセス（`scripts/extract_candidates.py`）を起動し、文字起こしを1行ずつ渡して候補を JSON Lines で受け取る。
 
 - `Sources/Candidates/`：候補抽出プロセスとの受け渡し（`CandidateExtractor`）
-- `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。標準ライブラリのみ
-- `scripts/claude_cli.py`：scripts/ から claude -p を呼ぶ共通部分（claude の場所の解決、呼び出し、MCP を読まない、結果の取り出し）。claude -p を使うスクリプトはこれを使う
+- `scripts/extract_candidates.py`：相手の発言が落ち着いたら直近のやり取りを claude -p に渡す。8 文字以下の発言だけでは呼ばない（2026-11-05、実際の会議で相手の発言の約 3 割）。標準ライブラリのみ
+- `scripts/claude_cli.py`：scripts/ から claude -p を呼ぶ共通部分（claude の場所の解決、呼び出し、MCP とユーザー全体の設定を読まない、結果の取り出し）。claude -p を使うスクリプトはこれを使う
 
 候補を選んだら調べる部分（README の 5）を追加（2026-10-27）。`answer --repo <path>` を録音とは別のターミナルで動かし、選んだ候補だけ外部プロセス（`scripts/answer_question.py`）に渡す。claude -p には読み取り用のツール（Read / Grep / Glob）だけを渡す。`--repo` が無ければ WebSearch / WebFetch だけを渡して Web で調べる（2026-11-05、UI でリポジトリ未選択のとき）。
 
@@ -61,7 +61,9 @@ ScreenCaptureKit の2トラック取得の検証は完了（2026-10-13, macOS 27
 - 「もしもし」程度の短い発言は、whisper が「お疲れ様でした」「そうですね」など言っていない文に置き換えることが多い
 
 未検証のまま残っている点：
-- ヘッドホンなしで Meet に出たときの回り込みの対策。実際の会議（2026-11-05）で「自分」の 402 行のうち 377 行が「相手」と 8 割以上重なった。マイクに AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）を既定で有効にしたが、Chrome の音を除けるかは実機で未確認。効かなければ、重なった「自分」の行を除く案に切り替える
+- ヘッドホンなしで Meet に出たときの回り込みの対策。実際の会議（2026-11-05）で「自分」の 402 行のうち 377 行が「相手」と 8 割以上重なった。マイクに AVAudioEngine のボイス処理（`setVoiceProcessingEnabled`）を既定で有効にした。スピーカーで短く試した範囲（2026-11-05、相手の発言 3 件）では、相手の文は「自分」の行に現れなかった。実際の会議では未確認で、効かなければ、重なった「自分」の行を除く案に切り替える
+- whisper-server の共有による遅延。両トラックが重なっても欠けずに文字起こしされる（2026-11-05）が、実際の会議での遅れは未確認
+- `--duration 60` で録音が 63.9 秒になった（2026-11-05、2トラックの差は 0.02 秒）。原因は未調査
 - 長めの文（質問）での文字起こし精度。静かな環境で確かめる
 
 ## ビルド構成

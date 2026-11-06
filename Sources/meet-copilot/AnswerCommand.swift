@@ -5,7 +5,6 @@ import Foundation
 struct AnswerOptions {
     var repos: [String] = []
     var outputDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    var answerer: String?
 }
 
 func parseAnswerOptions(_ arguments: ArraySlice<String>) -> AnswerOptions {
@@ -24,9 +23,6 @@ func parseAnswerOptions(_ arguments: ArraySlice<String>) -> AnswerOptions {
         case "--out":
             guard let v = args.next() else { fail("--out に値がない") }
             options.outputDir = URL(fileURLWithPath: v)
-        case "--answerer":
-            guard let v = args.next(), !v.isEmpty else { fail("--answerer に値がない") }
-            options.answerer = v
         case "-h", "--help":
             print(usage)
             exit(0)
@@ -37,13 +33,6 @@ func parseAnswerOptions(_ arguments: ArraySlice<String>) -> AnswerOptions {
     return options
 }
 
-/// transcript-<日時>.jsonl の1行。前後のやり取りとして渡す分だけ読む。
-private struct TranscriptRow: Decodable {
-    let speaker: String
-    let start: Double
-    let text: String
-}
-
 /// 録音1回分（同じ <日時> の candidates / transcript / answers）のファイル。
 private struct Meeting {
     let stamp: String
@@ -51,33 +40,22 @@ private struct Meeting {
     let transcriptURL: URL
     let answersURL: URL
 
-    /// 出力ディレクトリのうち、いちばん新しい録音。<日時> は「秒までの日時-ランダムな接尾辞」なので、
-    /// 秒までの日時で比べ、同じ秒ならファイルの作成日時で比べる
+    /// 出力ディレクトリのうち、いちばん新しい録音。<日時> は秒までの日時から始まるので、名前で比べれば足りる
     static func latest(in dir: URL) -> Meeting? {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        let secondPrefix = "candidates-yyyyMMdd-HHmmss".count
-        func created(_ name: String) -> Date {
-            let path = dir.appendingPathComponent(name).path
-            return (try? FileManager.default.attributesOfItem(atPath: path)[.creationDate] as? Date) ?? .distantPast
-        }
-        let candidateFiles = names.filter { $0.hasPrefix("candidates-") && $0.hasSuffix(".jsonl") }
-        guard let name = candidateFiles.max(by: { a, b in
-            let (secondA, secondB) = (a.prefix(secondPrefix), b.prefix(secondPrefix))
-            if secondA != secondB { return secondA < secondB }
-            return (created(a), a) < (created(b), b)
-        }) else { return nil }
+        guard let name = names.filter({ $0.hasPrefix("candidates-") && $0.hasSuffix(".jsonl") }).max() else { return nil }
         let stamp = String(name.dropFirst("candidates-".count).dropLast(".jsonl".count))
         return Meeting(
             stamp: stamp,
             candidatesURL: dir.appendingPathComponent(name),
             transcriptURL: dir.appendingPathComponent("transcript-\(stamp).jsonl"),
-            answersURL: answersURL(in: dir, stamp: stamp)
+            answersURL: answersFileURL(in: dir, stamp: stamp)
         )
     }
+}
 
-    static func answersURL(in dir: URL, stamp: String) -> URL {
-        dir.appendingPathComponent("answers-\(stamp).jsonl")
-    }
+private func answersFileURL(in dir: URL, stamp: String) -> URL {
+    dir.appendingPathComponent("answers-\(stamp).jsonl")
 }
 
 /// 調査プロセスを起動するコマンド。answer コマンドと UI で共通
@@ -94,7 +72,7 @@ func makeAnswerRequest(meeting: String, candidate: Candidate, transcript: [Answe
 /// 答え1件を answers-<日時>.jsonl に書き足して閉じる。失敗なら false
 func appendAnswer(_ answer: Answer, toMeeting stamp: String, in dir: URL) -> Bool {
     do {
-        let file = try JSONLinesFile(url: dir.appendingPathComponent("answers-\(stamp).jsonl"), name: "answers", appending: true)
+        let file = try JSONLinesFile(url: answersFileURL(in: dir, stamp: stamp), name: "answers", appending: true)
         file.append(try JSONLinesFile.encode(answer))
         let summary = file.close()
         if summary.failed { fputs(summary.description + "\n", stderr) }
@@ -112,7 +90,6 @@ private final class AnswerSession: @unchecked Sendable {
     private let lock = NSLock()
     // 以下は lock の中で触る
     private var meeting: Meeting?
-    private var answers: JSONLinesFile?
     private var candidates: [Candidate] = []
     private var answered: Set<String> = []
     private var inProgress: Set<String> = []
@@ -130,14 +107,6 @@ private final class AnswerSession: @unchecked Sendable {
         lock.withLock {
             guard let latest = Meeting.latest(in: outputDir) else { return }
             if latest.stamp != meeting?.stamp {
-                closeAnswers()
-                do {
-                    answers = try JSONLinesFile(url: latest.answersURL, name: "answers", appending: true)
-                } catch {
-                    fputs("answers のファイルを開けない: \(error)\n", stderr)
-                    answers = nil
-                    answersFailed = true
-                }
                 meeting = latest
                 answered = Set(JSONLinesFile.read(Answer.self, from: latest.answersURL).map { Self.key($0.at, $0.question) })
                 inProgress = []
@@ -180,8 +149,7 @@ private final class AnswerSession: @unchecked Sendable {
             let candidate = candidates[number - 1]
             let key = Self.key(candidate.at, candidate.question)
             if inProgress.contains(key) { return .inProgress(candidate.question) }
-            let transcript = JSONLinesFile.read(TranscriptRow.self, from: meeting.transcriptURL)
-                .map { AnswerRequest.Utterance(speaker: $0.speaker, start: $0.start, text: $0.text) }
+            let transcript = JSONLinesFile.read(AnswerRequest.Utterance.self, from: meeting.transcriptURL)
             inProgress.insert(key)
             failed.remove(key)
             return .request(makeAnswerRequest(meeting: meeting.stamp, candidate: candidate, transcript: transcript))
@@ -193,15 +161,13 @@ private final class AnswerSession: @unchecked Sendable {
             switch result {
             case .answered(let answer):
                 let key = Self.key(answer.at, answer.question)
-                // 調べている間に録音が切り替わっていたら、問いを出した録音のファイルに書く
                 let current = answer.meeting == nil || answer.meeting == meeting?.stamp
                 if current {
                     inProgress.remove(key)
                     answered.insert(key)
                 }
-                if current {
-                    if let line = try? JSONLinesFile.encode(answer) { answers?.append(line) }
-                } else if let stamp = answer.meeting, !appendAnswer(answer, toMeeting: stamp, in: outputDir) {
+                // 調べている間に録音が切り替わっていても、問いを出した録音のファイルに書く
+                if let stamp = answer.meeting ?? meeting?.stamp, !appendAnswer(answer, toMeeting: stamp, in: outputDir) {
                     answersFailed = true
                 }
 
@@ -226,37 +192,22 @@ private final class AnswerSession: @unchecked Sendable {
         }
     }
 
-    /// answers のファイルを閉じる。書き込みに失敗していれば false
-    func close() -> Bool {
-        lock.withLock {
-            closeAnswers()
-            return !answersFailed
-        }
-    }
-
-    private func closeAnswers() {
-        guard let answers else { return }
-        let summary = answers.close()
-        print(summary.description)
-        if summary.failed { answersFailed = true }
-        self.answers = nil
+    /// 答えをすべて answers のファイルに書けたか
+    var allAnswersWritten: Bool {
+        lock.withLock { !answersFailed }
     }
 }
 
 func answer(_ options: AnswerOptions) -> Never {
-    let command = options.answerer
-        ?? answererCommand(repos: options.repos)
     let session = AnswerSession(outputDir: options.outputDir)
-    let answerer = CandidateAnswerer(command: command) { session.receive($0) }
+    let answerer = CandidateAnswerer(command: answererCommand(repos: options.repos)) { session.receive($0) }
     do {
         try answerer.start()
     } catch {
         fail("調査プロセスを起動できない: \(error)")
     }
 
-    if options.answerer == nil {
-        print("調べる対象: " + (options.repos.isEmpty ? "Web（--repo なし）" : options.repos.joined(separator: ", ")))
-    }
+    print("調べる対象: " + (options.repos.isEmpty ? "Web（--repo なし）" : options.repos.joined(separator: ", ")))
 
     // q・入力の終わり・Ctrl-C・調査プロセスの終了のどれでも、受け取った問いを調べ終えてから閉じる。
     // 問いの送信も finishing の中で行い、終了処理が始まった後は新しい問いを渡さない
@@ -267,8 +218,7 @@ func answer(_ options: AnswerOptions) -> Never {
         print("\n調査の残りを処理中...")
         Task.detached {
             let succeeded = report(await answerer.finish(), of: "調査プロセス")
-            let closed = session.close()
-            exit(succeeded && closed ? exitCode : 1)
+            exit(succeeded && session.allAnswersWritten ? exitCode : 1)
         }
     }
 

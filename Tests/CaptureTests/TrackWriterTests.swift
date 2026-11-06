@@ -35,11 +35,26 @@ final class TrackWriterTests: XCTestCase {
 
         XCTAssertEqual(summary.seconds, 1.0, accuracy: 0.001)
         XCTAssertEqual(summary.peakDBFS, 20 * log10(0.5), accuracy: 0.01)
-        let file = try AVAudioFile(forReading: summary.url)
+        let file = try AVAudioFile(forReading: try XCTUnwrap(summary.url))
         XCTAssertEqual(file.length, 48_000)
     }
 
-    func testArmAfterDisarmDoesNotResume() {
+    func testWithoutURLCountsButWritesNothing() {
+        let writer = TrackWriter(name: "t", url: nil)
+        var accepted = 0
+        writer.onAccepted = { _ in accepted += 1 }
+        writer.arm()
+        writer.write(buffer(frames: 48_000, amplitude: 0.5))
+        let summary = writer.close()
+
+        XCTAssertEqual(accepted, 1)
+        XCTAssertEqual(summary.seconds, 1.0, accuracy: 0.001)
+        XCTAssertNil(summary.url)
+        XCTAssertNil(summary.writeError)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
+    }
+
+    func testArmAfterDisarmDoesNotResume() throws {
         let writer = TrackWriter(name: "t", url: dir.appendingPathComponent("t.wav"))
         writer.disarm()
         writer.arm()
@@ -47,7 +62,7 @@ final class TrackWriterTests: XCTestCase {
         let summary = writer.close()
 
         XCTAssertNil(summary.inputFormat)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: summary.url.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(summary.url).path))
     }
 
     func testOpenFailureIsReported() {
